@@ -1,20 +1,53 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useState } from "react";
+import * as Font from "expo-font";
+import { StatusBar } from "expo-status-bar";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { NavigationContainer } from "@react-navigation/native";
+import { ThemeProvider, useTheme } from "./src/theme/ThemeContext";
+import { FeedbackProvider } from "./src/components/Feedback";
+import { AuthProvider } from "./src/context/AuthContext";
+import { CategoriesProvider } from "./src/context/CategoriesContext";
+import { PinProvider } from "./src/context/PinContext";
+import RootNavigator from "./src/navigation/RootNavigator";
+import { FONT_ASSETS, applyGlobalFont } from "./src/theme/fonts";
 
-export default function App() {
+// Patch Text/TextInput to render in Inter app-wide (before any render).
+applyGlobalFont();
+
+function ThemedApp() {
+  const { mode } = useTheme();
   return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
+    <NavigationContainer>
+      <StatusBar style={mode === "dark" ? "light" : "dark"} />
+      <RootNavigator />
+    </NavigationContainer>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+export default function App() {
+  const [fontsLoaded, setFontsLoaded] = useState(false);
+
+  useEffect(() => {
+    Font.loadAsync(FONT_ASSETS)
+      .catch((e) => console.warn("[Fonts] Inter load failed", e?.message || e))
+      .finally(() => setFontsLoaded(true));
+  }, []);
+
+  if (!fontsLoaded) return null;
+
+  return (
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <FeedbackProvider>
+          <AuthProvider>
+            <CategoriesProvider>
+              <PinProvider>
+                <ThemedApp />
+              </PinProvider>
+            </CategoriesProvider>
+          </AuthProvider>
+        </FeedbackProvider>
+      </ThemeProvider>
+    </SafeAreaProvider>
+  );
+}
