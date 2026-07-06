@@ -13,29 +13,24 @@ import {
   TextInput,
   View,
 } from "react-native";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import { useTheme } from "../theme/ThemeContext";
-import { useCategories } from "../context/CategoriesContext";
-import ChipPicker from "./ChipPicker";
+import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
+import { usePaymentMethods, useQuickAddPayment } from "../context/PaymentMethodsContext";
+import SelectField from "./SelectField";
 import { Button } from "./UI";
-import {
-  PAYMENT_METHODS,
-  PAYMENT_LABELS,
-  PAYMENT_EMOJI,
-  DEFAULT_PAYMENT,
-} from "../constants/categories";
+import { DEFAULT_PAYMENT } from "../constants/categories";
+import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
+import { amountToWords } from "../util/money";
 
 export interface PlanPayResult {
+  name: string;
   amount: number;
   category: string;
   paymentMethod: string;
   notes: string;
+  dateValue: string; // YYYY-MM-DD
 }
-
-const PAY_OPTS = PAYMENT_METHODS.map((k) => ({
-  key: k,
-  label: PAYMENT_LABELS[k],
-  emoji: PAYMENT_EMOJI[k],
-}));
 
 export default function PlanPayModal({
   visible,
@@ -44,6 +39,8 @@ export default function PlanPayModal({
   confirmText,
   defaultAmount,
   defaultCategory,
+  defaultName,
+  showName,
   onClose,
   onSubmit,
   onError,
@@ -54,6 +51,8 @@ export default function PlanPayModal({
   confirmText: string;
   defaultAmount: number;
   defaultCategory: string;
+  defaultName?: string;
+  showName?: boolean;
   onClose: () => void;
   onSubmit: (r: PlanPayResult) => void;
   onError: (m: string) => void;
@@ -61,24 +60,36 @@ export default function PlanPayModal({
   const { colors } = useTheme();
   const { options } = useCategories();
   const catOpts = options(false);
+  const { options: payOpts } = usePaymentMethods();
+  const quickAddCategory = useQuickAddCategory();
+  const quickAddPayment = useQuickAddPayment();
+  const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState(defaultCategory);
   const [payment, setPayment] = useState(DEFAULT_PAYMENT);
   const [notes, setNotes] = useState("");
+  const [dateVal, setDateVal] = useState(todayStr());
+  const [showDate, setShowDate] = useState(false);
 
   useEffect(() => {
     if (visible) {
+      setName(defaultName || "");
       setAmount(defaultAmount ? String(defaultAmount) : "");
       setCategory(defaultCategory);
       setPayment(DEFAULT_PAYMENT);
       setNotes("");
+      setDateVal(todayStr());
+      setShowDate(false);
     }
-  }, [visible, defaultAmount, defaultCategory]);
+  }, [visible, defaultAmount, defaultCategory, defaultName]);
 
   const submit = () => {
+    const nm = name.trim() || (defaultName || "").trim();
+    if (showName && !nm) return onError("Enter a name.");
     const amt = Number(amount);
     if (amount === "" || isNaN(amt) || amt <= 0) return onError("Enter a valid amount.");
-    onSubmit({ amount: amt, category, paymentMethod: payment, notes: notes.trim() });
+    console.log("[PlanPay] submit", { name: nm, amount: amt, category, date: dateVal });
+    onSubmit({ name: nm, amount: amt, category, paymentMethod: payment, notes: notes.trim(), dateValue: dateVal });
   };
 
   const inputStyle = [
@@ -95,6 +106,19 @@ export default function PlanPayModal({
               <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
               {!!subtitle && <Text style={{ color: colors.textMuted, marginBottom: 10 }}>{subtitle}</Text>}
 
+              {showName && (
+                <>
+                  <Text style={[styles.label, { color: colors.textMuted }]}>Name</Text>
+                  <TextInput
+                    style={inputStyle}
+                    value={name}
+                    onChangeText={setName}
+                    placeholder="e.g. Grocery"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </>
+              )}
+
               <Text style={[styles.label, { color: colors.textMuted }]}>Amount (₹)</Text>
               <TextInput
                 style={inputStyle}
@@ -105,12 +129,53 @@ export default function PlanPayModal({
                 placeholderTextColor={colors.textMuted}
                 autoFocus
               />
+              {Number(amount) > 0 && (
+                <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
+                  {amountToWords(amount)}
+                </Text>
+              )}
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Category</Text>
-              <ChipPicker options={catOpts} value={category} onChange={setCategory} />
+              <SelectField
+                title="Category"
+                placeholder="Select category"
+                options={catOpts}
+                value={category}
+                onChange={setCategory}
+                onAdd={quickAddCategory}
+                addLabel="Add category"
+              />
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Payment method</Text>
-              <ChipPicker options={PAY_OPTS} value={payment} onChange={setPayment} />
+              <SelectField
+                title="Payment method"
+                placeholder="Select payment method"
+                options={payOpts}
+                value={payment}
+                onChange={setPayment}
+                onAdd={quickAddPayment}
+                addLabel="Add payment method"
+              />
+
+              <Text style={[styles.label, { color: colors.textMuted }]}>Date</Text>
+              <Pressable
+                onPress={() => setShowDate(true)}
+                style={[inputStyle, { justifyContent: "center" }]}
+              >
+                <Text style={{ color: colors.text, fontSize: 16 }}>
+                  📅 {formatDateMedium(inputValueToDate(dateVal))}
+                </Text>
+              </Pressable>
+              {showDate && (
+                <DateTimePicker
+                  value={inputValueToDate(dateVal)}
+                  mode="date"
+                  onChange={(_e, d) => {
+                    setShowDate(false);
+                    if (d) setDateVal(dateToInputValue(d));
+                  }}
+                />
+              )}
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Notes (optional)</Text>
               <TextInput

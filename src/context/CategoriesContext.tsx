@@ -4,12 +4,14 @@
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useAuth } from "./AuthContext";
-import { watchCategories, CustomCategoryDoc } from "../firebase/firestore";
+import { useFeedback } from "../components/Feedback";
+import { watchCategories, addCategory, CustomCategoryDoc } from "../firebase/firestore";
 import {
   CATEGORY_KEYS,
   CATEGORY_LABELS,
   CATEGORY_EMOJI,
   CATEGORY_COLORS,
+  CATEGORY_PALETTE,
 } from "../constants/categories";
 import { ChipOption } from "../components/ChipPicker";
 
@@ -19,6 +21,7 @@ export interface Category {
   emoji: string;
   color: string;
   custom: boolean;
+  docId?: string; // Firestore doc id when editable (custom or overridden default)
 }
 
 const DEFAULTS: Category[] = CATEGORY_KEYS.map((k) => ({
@@ -69,19 +72,40 @@ export function CategoriesProvider({ children }: { children: React.ReactNode }) 
   }, [user]);
 
   const value = useMemo<CategoriesValue>(() => {
-    // Custom categories go after the defaults but before "other".
-    const otherIdx = DEFAULTS.findIndex((c) => c.key === "other");
-    const customCats: Category[] = custom.map((c) => ({
-      key: c.id,
-      label: c.label || c.id,
+    // Custom docs either override/hide a built-in (have `key`) or add a new one.
+    const overrideByKey: Record<string, CustomCategoryDoc> = {};
+    const hidden = new Set<string>();
+    const news: CustomCategoryDoc[] = [];
+    custom.forEach((c) => {
+      if (c.key) {
+        if (c.hidden) hidden.add(c.key);
+        else overrideByKey[c.key] = c;
+      } else {
+        news.push(c);
+      }
+    });
+    const toCat = (c: CustomCategoryDoc, key: string): Category => ({
+      key,
+      label: c.label || key,
       emoji: c.emoji || "📌",
       color: c.color || CATEGORY_COLORS.other,
       custom: true,
-    }));
+      docId: c.id,
+    });
+    // Defaults: drop hidden, apply overrides.
+    const defaultsResolved: Category[] = DEFAULTS.filter((d) => !hidden.has(d.key)).map((d) =>
+      overrideByKey[d.key] ? toCat(overrideByKey[d.key], d.key) : d
+    );
+    const newCats: Category[] = news
+      .slice()
+      .sort((a, b) => (a.label || "").localeCompare(b.label || ""))
+      .map((c) => toCat(c, c.id));
+    // New custom categories go before "other".
+    const otherIdx = defaultsResolved.findIndex((c) => c.key === "other");
     const categories =
       otherIdx === -1
-        ? [...DEFAULTS, ...customCats]
-        : [...DEFAULTS.slice(0, otherIdx), ...customCats, ...DEFAULTS.slice(otherIdx)];
+        ? [...defaultsResolved, ...newCats]
+        : [...defaultsResolved.slice(0, otherIdx), ...newCats, ...defaultsResolved.slice(otherIdx)];
 
     const byKey = Object.fromEntries(categories.map((c) => [c.key, c]));
     const label = (k?: string) => byKey[k || "other"]?.label || k || "Other";
@@ -99,3 +123,27 @@ export function CategoriesProvider({ children }: { children: React.ReactNode }) 
 }
 
 export const useCategories = () => useContext(CategoriesContext);
+
+// Quick-add a category from a picker: prompt for a name, auto-assign an emoji +
+// palette color, save to Firestore (so it also shows in Profile), return its key.
+export function useQuickAddCategory() {
+  const { user } = useAuth();
+  const { prompt, toast } = useFeedback();
+  const { categories } = useCategories();
+  return async (): Promise<string | null> => {
+    if (!user) return null;
+    const name = await prompt({ title: "New category", placeholder: "e.g. Travel", confirmText: "Add" });
+    if (!name || !name.trim()) return null;
+    const n = name.trim();
+    if (categories.some((c) => c.label.toLowerCase() === n.toLowerCase())) {
+      toast("That category already exists.", "error");
+      return null;
+    }
+    const used = new Set(categories.filter((c) => c.custom).map((c) => c.color));
+    const color = CATEGORY_PALETTE.find((c) => !used.has(c)) || CATEGORY_PALETTE[0];
+    const id = await addCategory(user.uid, { label: n, emoji: "🏷️", color });
+    console.log("[Category] quick-added", { id, name: n });
+    toast("Category added", "success");
+    return id;
+  };
+}

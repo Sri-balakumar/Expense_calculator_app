@@ -13,7 +13,8 @@ import {
 } from "react-native";
 import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
-import { listMonths, createMonth } from "../firebase/firestore";
+import { fetchMonthsData, createMonth } from "../firebase/firestore";
+import { formatMoney } from "../util/money";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -30,21 +31,29 @@ export default function MonthPickerModal({
   onOpenMonth: (monthId: string) => void;
 }) {
   const { colors } = useTheme();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const [year, setYear] = useState(new Date().getFullYear());
   const [existing, setExisting] = useState<Record<string, string>>({});
   const [pending, setPending] = useState<string | null>(null); // fullName awaiting balance
   const [balance, setBalance] = useState("");
   const [busy, setBusy] = useState(false);
+  // Carry-over from the most recent month's leftover balance.
+  const [lastRemaining, setLastRemaining] = useState(0);
+  const [lastMonthName, setLastMonthName] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible || !user) return;
-    listMonths(user.uid).then((months) => {
-      const map: Record<string, string> = {};
-      months.forEach((m) => (map[m.name] = m.id));
-      setExisting(map);
-    });
-  }, [visible, user]);
+    fetchMonthsData(user.uid, Number(profile?.salary) || 0)
+      .then((months) => {
+        const map: Record<string, string> = {};
+        months.forEach((m) => (map[m.name] = m.id));
+        setExisting(map);
+        const latest = months[0]; // newest first
+        setLastRemaining(latest ? Math.max(0, Number(latest.totalRemaining) || 0) : 0);
+        setLastMonthName(latest ? latest.name : null);
+      })
+      .catch(() => {});
+  }, [visible, user, profile?.salary]);
 
   const onTile = (monthName: string) => {
     const fullName = `${monthName} ${year}`;
@@ -53,7 +62,8 @@ export default function MonthPickerModal({
       onOpenMonth(existing[fullName]);
       return;
     }
-    setBalance("");
+    // Pre-fill with last month's leftover so it carries over by default.
+    setBalance(lastRemaining > 0 ? String(lastRemaining) : "");
     setPending(fullName);
   };
 
@@ -138,6 +148,16 @@ export default function MonthPickerModal({
               Current balance (₹) — cash on hand now, added on top of your salary
               for this month.
             </Text>
+            {lastRemaining > 0 && lastMonthName && (
+              <Pressable
+                onPress={() => setBalance(String(lastRemaining))}
+                style={[styles.carryBtn, { backgroundColor: colors.chipBg }]}
+              >
+                <Text style={{ color: colors.primary, fontWeight: "700" }}>
+                  ↩ Carry {formatMoney(lastRemaining)} left from {lastMonthName}
+                </Text>
+              </Pressable>
+            )}
             <TextInput
               style={[
                 styles.input,
@@ -212,6 +232,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 16,
+  },
+  carryBtn: {
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+    alignItems: "center",
   },
   actions: { flexDirection: "row", gap: 10, marginTop: 18 },
   actBtn: { flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center" },

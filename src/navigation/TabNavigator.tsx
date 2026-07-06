@@ -107,6 +107,8 @@ export default function TabNavigator() {
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarShowLabel: false,
+        // Animate the content when switching tabs (movement on tap).
+        animation: "shift",
         // Full-width purple bar anchored to the bottom, top corners rounded.
         tabBarStyle: {
           position: "absolute",

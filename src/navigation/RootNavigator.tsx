@@ -37,19 +37,16 @@ function Splash() {
   return (
     <View style={[styles.splash, { backgroundColor: colors.bgSoft }]}>
       <Animated.View style={{ alignItems: "center", opacity, transform: [{ scale }] }}>
-        {/* White tile keeps the white-background artwork looking intentional in
-            both light and dark mode instead of a bare white box on dark. */}
-        <View style={styles.splashTile}>
-          <Image
-            source={SPLASH_IMAGE}
-            style={styles.splashImage}
-            resizeMode="contain"
-            // Scale the large source down during native decode (Android) to avoid
-            // a decode stall; no-op on iOS.
-            resizeMethod="resize"
-            fadeDuration={0}
-          />
-        </View>
+        {/* Transparent logo art only — no white backing tile. */}
+        <Image
+          source={SPLASH_IMAGE}
+          style={styles.splashImage}
+          resizeMode="contain"
+          // Scale the large source down during native decode (Android) to avoid
+          // a decode stall; no-op on iOS.
+          resizeMethod="resize"
+          fadeDuration={0}
+        />
         <Text style={[styles.splashTitle, { color: colors.text }]}>
           Expense Calculator
         </Text>
@@ -79,17 +76,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  splashTile: {
-    backgroundColor: "#ffffff",
-    borderRadius: 28,
-    padding: 18,
-    shadowColor: "#000",
-    shadowOpacity: 0.12,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
-  },
-  splashImage: { width: 190, height: 190 },
+  splashImage: { width: 220, height: 220 },
   splashTitle: {
     marginTop: 20,
     fontSize: 22,

@@ -526,6 +526,10 @@ export interface CustomCategoryDoc {
   label: string;
   emoji: string;
   color: string;
+  // When set, this doc overrides/hides the built-in category with this key
+  // (keeps existing entries linked). Otherwise it's a brand-new category.
+  key?: string;
+  hidden?: boolean;
   createdAt?: any;
 }
 
@@ -559,4 +563,50 @@ export async function updateCategory(
 
 export async function deleteCategory(uid: string, id: string): Promise<void> {
   await deleteDoc(doc(categoriesCol(uid), id));
+}
+
+// ---- custom payment methods (subcollection users/{uid}/paymentMethods/{id}) --
+const paymentMethodsCol = (uid: string) =>
+  collection(db, "users", uid, "paymentMethods");
+
+export interface CustomPaymentDoc {
+  id: string;
+  label: string;
+  emoji: string;
+  // When set, overrides/hides the built-in payment method with this key.
+  key?: string;
+  hidden?: boolean;
+  createdAt?: any;
+}
+
+export function watchPaymentMethods(
+  uid: string,
+  cb: (methods: CustomPaymentDoc[]) => void,
+  onError?: (e: any) => void
+): () => void {
+  return onSnapshot(
+    paymentMethodsCol(uid),
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))),
+    onError
+  );
+}
+
+export async function addPaymentMethod(
+  uid: string,
+  pm: Omit<CustomPaymentDoc, "id" | "createdAt">
+): Promise<string> {
+  const ref = await addDoc(paymentMethodsCol(uid), { ...pm, createdAt: serverTimestamp() });
+  return ref.id;
+}
+
+export async function updatePaymentMethod(
+  uid: string,
+  id: string,
+  updates: Partial<Omit<CustomPaymentDoc, "id" | "createdAt">>
+): Promise<void> {
+  await updateDoc(doc(paymentMethodsCol(uid), id), updates as any);
+}
+
+export async function deletePaymentMethod(uid: string, id: string): Promise<void> {
+  await deleteDoc(doc(paymentMethodsCol(uid), id));
 }

@@ -80,5 +80,7 @@ export interface UserDoc {
   name: string;
   salary: number;
   email: string;
+  // Global savings pot, shown as "Total with main balance"; not spent from months.
+  mainBalance?: number;
   createdAt?: any;
 }

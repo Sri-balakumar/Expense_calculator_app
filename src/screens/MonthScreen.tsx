@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Modal,
   Pressable,
   ScrollView,
@@ -16,6 +17,7 @@ import { useFeedback } from "../components/Feedback";
 import { Card } from "../components/UI";
 import Calculator from "../components/Calculator";
 import ExpenseFormModal, { ExpenseFormResult } from "../components/ExpenseFormModal";
+import MultiSelectField from "../components/MultiSelectField";
 import {
   TrackerType,
   getMonth,
@@ -40,12 +42,9 @@ import {
   dateToInputValue,
   formatDateTime,
 } from "../util/date";
-import {
-  PAYMENT_EMOJI,
-  PAYMENT_LABELS,
-  DEFAULT_CATEGORY,
-} from "../constants/categories";
+import { DEFAULT_CATEGORY } from "../constants/categories";
 import { useCategories } from "../context/CategoriesContext";
+import { usePaymentMethods } from "../context/PaymentMethodsContext";
 import { Expense } from "../types";
 
 export default function MonthScreen({ route, navigation }: any) {
@@ -72,7 +71,17 @@ export default function MonthScreen({ route, navigation }: any) {
   const [tab, setTab] = useState<"expenses" | "saved">("expenses");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "minus" | "plus">("all");
-  const [catFilter, setCatFilter] = useState<string>("all");
+  // Multi-select category filter: empty set = all categories.
+  const [catFilter, setCatFilter] = useState<Set<string>>(new Set());
+  const toggleCatFilter = (key: string) =>
+    setCatFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const [catOpen, setCatOpen] = useState(false); // "By category" dropdown
+  const [weekFilter, setWeekFilter] = useState<number | null>(null); // tap a week to filter
 
   const [formVisible, setFormVisible] = useState(false);
   const [formMode, setFormMode] = useState<"add" | "edit">("add");
@@ -85,6 +94,8 @@ export default function MonthScreen({ route, navigation }: any) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const [exportFmt, setExportFmt] = useState<null | "pdf" | "excel">(null);
+  const [exporting, setExporting] = useState<null | "pdf" | "excel">(null);
+  const exportingRef = useRef(false); // synchronous re-entry guard
   const [weekSel, setWeekSel] = useState<Set<number>>(new Set());
 
   // --- load tracker doc + subscribe to expenses/saved calcs ---
@@ -148,13 +159,16 @@ export default function MonthScreen({ route, navigation }: any) {
   }, [expenses]);
 
   const totalRemaining = (isBudget ? limit : currentBalance) - spent + income;
+  // Global savings pot from Profile — shown as a combined figure, not spent from.
+  const mainBalance = Number(profile?.mainBalance) || 0;
 
   // --- filtering ---
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
     return expenses.filter((e) => {
       if (filter !== "all" && e.type !== filter) return false;
-      if (catFilter !== "all" && (e.category || DEFAULT_CATEGORY) !== catFilter) return false;
+      if (catFilter.size > 0 && !catFilter.has(e.category || DEFAULT_CATEGORY)) return false;
+      if (weekFilter !== null && weekOfMonth(toJsDate(e.createdAt)) !== weekFilter) return false;
       if (term) {
         const hay = (
           e.name +
@@ -169,7 +183,19 @@ export default function MonthScreen({ route, navigation }: any) {
       }
       return true;
     });
-  }, [expenses, search, filter, catFilter, catLabel]);
+  }, [expenses, search, filter, catFilter, weekFilter, catLabel]);
+
+  // Totals of the currently-visible (filtered) entries — shown at the bottom.
+  const filteredSummary = useMemo(() => {
+    let spend = 0,
+      income = 0;
+    filtered.forEach((e) => {
+      const a = Number(e.amount) || 0;
+      if (e.type === "plus") income += a;
+      else spend += a;
+    });
+    return { spend, income };
+  }, [filtered]);
 
   // Categories actually present in this tracker's spends, for the filter chips.
   const presentCats = useMemo(() => {
@@ -199,7 +225,7 @@ export default function MonthScreen({ route, navigation }: any) {
 
   const grouped = useMemo(() => {
     // For months, unfiltered: group by week. Else flat.
-    if (isBudget || filter !== "all" || catFilter !== "all" || search.trim()) {
+    if (isBudget || filter !== "all" || catFilter.size > 0 || weekFilter !== null || search.trim()) {
       return [{ week: null as number | null, items: filtered }];
     }
     const map = new Map<number, Expense[]>();
@@ -210,7 +236,7 @@ export default function MonthScreen({ route, navigation }: any) {
       map.get(wk)!.push(e);
     });
     return Array.from(map.entries()).map(([week, items]) => ({ week, items }));
-  }, [filtered, isBudget, filter, catFilter, search]);
+  }, [filtered, isBudget, filter, catFilter, weekFilter, search]);
 
   // --- weekly breakdown (months only) ---
   const weeklyTotals = useMemo(() => {
@@ -235,7 +261,13 @@ export default function MonthScreen({ route, navigation }: any) {
   }, [expenses, catBudgets]);
 
   // --- actions ---
+  // Spin the + FAB a full turn when tapped.
+  const fabSpin = useRef(new Animated.Value(0)).current;
+  const spinDeg = fabSpin.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
   const onAdd = () => {
+    fabSpin.setValue(0);
+    Animated.timing(fabSpin, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+    console.log("[FAB] + tapped (spin)");
     setFormMode("add");
     setEditTarget(null);
     setFormVisible(true);
@@ -387,7 +419,7 @@ export default function MonthScreen({ route, navigation }: any) {
 
   // --- export ---
   // Any type/category/search filter active → export exactly the filtered view.
-  const hasActiveFilter = filter !== "all" || catFilter !== "all" || !!search.trim();
+  const hasActiveFilter = filter !== "all" || catFilter.size > 0 || weekFilter !== null || !!search.trim();
 
   // Human label of the active filter, appended to the export title + filename
   // so a downloaded file clearly shows what it contains.
@@ -395,7 +427,8 @@ export default function MonthScreen({ route, navigation }: any) {
     const parts: string[] = [];
     if (filter === "minus") parts.push("Spends");
     else if (filter === "plus") parts.push("Income");
-    if (catFilter !== "all") parts.push(catLabel(catFilter));
+    if (catFilter.size > 0) parts.push([...catFilter].map((k) => catLabel(k)).join(", "));
+    if (weekFilter !== null) parts.push("Week " + weekFilter);
     if (search.trim()) parts.push(search.trim());
     return parts.join(" - ") || "Filtered";
   };
@@ -405,6 +438,12 @@ export default function MonthScreen({ route, navigation }: any) {
     weekFilter: Set<number> | null,
     source: Expense[]
   ) => {
+    // Block re-entry (prevents double-tap opening two save pickers → errors).
+    if (exportingRef.current) {
+      console.log("[Export] already running, ignoring tap");
+      return;
+    }
+    exportingRef.current = true;
     const ctx = {
       monthName: hasActiveFilter ? `${name} - ${filterDesc()}` : name,
       userName: profile?.name || "",
@@ -413,11 +452,23 @@ export default function MonthScreen({ route, navigation }: any) {
       currentBalance,
       catLabel,
     };
+    setExporting(fmt);
+    console.log("[Export] preparing", fmt, ctx.monthName);
     try {
-      if (fmt === "pdf") await exportPdf(source, weekFilter, ctx);
-      else await exportExcel(source, weekFilter, ctx);
+      const saved =
+        fmt === "pdf"
+          ? await exportPdf(source, weekFilter, ctx)
+          : await exportExcel(source, weekFilter, ctx);
+      if (saved) {
+        console.log("[Export] downloaded", fmt);
+        toast(`${fmt.toUpperCase()} downloaded ✓ Saved to your folder`, "success");
+      }
     } catch (e: any) {
+      console.warn("[Export] failed", e?.message);
       toast(e?.message || "Export failed.", "error");
+    } finally {
+      setExporting(null);
+      exportingRef.current = false;
     }
   };
 
@@ -463,6 +514,16 @@ export default function MonthScreen({ route, navigation }: any) {
           >
             {formatMoney(Math.abs(totalRemaining))}
           </Text>
+          {!isBudget && mainBalance > 0 && (
+            <View style={{ alignItems: "center", marginTop: 8 }}>
+              <Text style={{ color: colors.textMuted, fontSize: 12 }}>
+                With main balance (+{formatMoney(mainBalance)})
+              </Text>
+              <Text style={{ color: colors.text, fontWeight: "800", fontSize: 22, letterSpacing: -0.3 }}>
+                {formatMoney(totalRemaining + mainBalance)}
+              </Text>
+            </View>
+          )}
           {!isBudget && (
             <View style={[styles.breakdown, { borderTopColor: colors.border, alignSelf: "stretch" }]}>
               <BreakItem label="Salary" value={formatMoney(limit)} colors={colors} />
@@ -502,21 +563,44 @@ export default function MonthScreen({ route, navigation }: any) {
             {/* Weekly breakdown (months only) */}
             {!isBudget && expenses.length > 0 && (
               <Card>
-                <Text style={[styles.cardTitle, { color: colors.text }]}>Weekly breakdown</Text>
-                <View style={styles.weekGrid}>
+                <View style={styles.between}>
+                  <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 0 }]}>
+                    Weekly breakdown
+                  </Text>
+                  {weekFilter !== null && (
+                    <Pressable onPress={() => setWeekFilter(null)}>
+                      <Text style={{ color: colors.primary, fontWeight: "700", fontSize: 12 }}>
+                        Clear · showing Week {weekFilter}
+                      </Text>
+                    </Pressable>
+                  )}
+                </View>
+                <View style={[styles.weekGrid, { marginTop: 10 }]}>
                   {[1, 2, 3, 4, 5]
                     .filter((w) => !(w === 5 && weeklyTotals[5] === 0))
-                    .map((w) => (
-                      <View key={w} style={[styles.weekTile, { backgroundColor: colors.bgSoft }]}>
-                        <Text style={{ color: colors.textMuted, fontSize: 12 }}>Week {w}</Text>
-                        <Text style={{ color: colors.text, fontWeight: "800" }}>
-                          {formatMoney(weeklyTotals[w])}
-                        </Text>
-                        <Text style={{ color: colors.textMuted, fontSize: 10 }}>
-                          Days {weekRange(w)}
-                        </Text>
-                      </View>
-                    ))}
+                    .map((w) => {
+                      const active = weekFilter === w;
+                      return (
+                        <Pressable
+                          key={w}
+                          onPress={() => setWeekFilter(active ? null : w)}
+                          style={[
+                            styles.weekTile,
+                            { backgroundColor: active ? colors.primary : colors.bgSoft },
+                          ]}
+                        >
+                          <Text style={{ color: active ? "#fff" : colors.textMuted, fontSize: 12 }}>
+                            Week {w}
+                          </Text>
+                          <Text style={{ color: active ? "#fff" : colors.text, fontWeight: "800" }}>
+                            {formatMoney(weeklyTotals[w])}
+                          </Text>
+                          <Text style={{ color: active ? "rgba(255,255,255,0.85)" : colors.textMuted, fontSize: 10 }}>
+                            Days {weekRange(w)}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                 </View>
               </Card>
             )}
@@ -548,12 +632,26 @@ export default function MonthScreen({ route, navigation }: any) {
               </Card>
             )}
 
-            {/* By category breakdown — color rows with bars */}
+            {/* By category breakdown — collapsible dropdown */}
             {categoryTotals.rows.length > 0 && (
               <Card>
-                <Text style={[styles.cardTitle, { color: colors.text }]}>By category</Text>
+                <Pressable onPress={() => setCatOpen((o) => !o)} style={styles.between}>
+                  <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 0 }]}>
+                    By category
+                  </Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                    <Text style={{ color: colors.danger, fontWeight: "800" }}>
+                      {formatMoney(categoryTotals.total)}
+                    </Text>
+                    <Text style={{ color: colors.textMuted, fontSize: 15 }}>
+                      {catOpen ? "▲" : "▼"}
+                    </Text>
+                  </View>
+                </Pressable>
+                {catOpen && (
+                <View style={{ marginTop: 12 }}>
                 {categoryTotals.rows.map((r) => {
-                  const active = catFilter === r.key;
+                  const active = catFilter.has(r.key);
                   const pct = categoryTotals.total
                     ? Math.round((r.total / categoryTotals.total) * 100)
                     : 0;
@@ -561,7 +659,7 @@ export default function MonthScreen({ route, navigation }: any) {
                   return (
                     <Pressable
                       key={r.key}
-                      onPress={() => setCatFilter(active ? "all" : r.key)}
+                      onPress={() => toggleCatFilter(r.key)}
                       style={[
                         styles.catBreakRow,
                         active && { backgroundColor: colors.chipBg },
@@ -594,16 +692,12 @@ export default function MonthScreen({ route, navigation }: any) {
                     </Pressable>
                   );
                 })}
-                <View style={[styles.catTotalRow, { borderTopColor: colors.border }]}>
-                  <Text style={{ color: colors.text, fontWeight: "800", flex: 1 }}>Total spent</Text>
-                  <Text style={{ color: colors.danger, fontWeight: "800" }}>
-                    {formatMoney(categoryTotals.total)}
-                  </Text>
-                </View>
-                {catFilter !== "all" && (
+                {catFilter.size > 0 && (
                   <Text style={{ color: colors.primary, fontSize: 12, marginTop: 8 }}>
-                    Filtering by {catLabel(catFilter)} — tap again to clear.
+                    Filtering by {[...catFilter].map((k) => catLabel(k)).join(", ")} — tap to toggle.
                   </Text>
+                )}
+                </View>
                 )}
               </Card>
             )}
@@ -637,56 +731,64 @@ export default function MonthScreen({ route, navigation }: any) {
                 </Pressable>
               ))}
             </View>
-            {/* Category filter — always visible, lists every category. */}
+            {/* Category filter — popup with multi-select. */}
             <Text style={[styles.filterLabel, { color: colors.textMuted }]}>Category</Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.catFilterRow}
-            >
-              <Pressable
-                onPress={() => setCatFilter("all")}
-                style={[
-                  styles.filterChip,
-                  { backgroundColor: catFilter === "all" ? colors.primary : colors.chipBg },
-                ]}
-              >
-                <Text style={{ color: catFilter === "all" ? "#fff" : colors.text, fontWeight: "600" }}>
-                  All
-                </Text>
-              </Pressable>
-              {allCats.map((c) => (
-                <Pressable
-                  key={c.key}
-                  onPress={() => setCatFilter(catFilter === c.key ? "all" : c.key)}
-                  style={[
-                    styles.filterChip,
-                    { backgroundColor: catFilter === c.key ? colors.primary : colors.chipBg },
-                  ]}
-                >
-                  <Text style={{ color: catFilter === c.key ? "#fff" : colors.text, fontWeight: "600" }}>
-                    {c.emoji} {c.label}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
+            <MultiSelectField
+              title="Filter by category"
+              allLabel="All categories"
+              values={catFilter}
+              onChange={setCatFilter}
+              options={allCats.map((c) => ({ key: c.key, label: c.label, emoji: c.emoji }))}
+            />
 
             {/* Export */}
             <View style={styles.exportRow}>
               <Text style={{ color: colors.textMuted, marginRight: 4 }}>Export:</Text>
               <Pressable
-                style={[styles.exportBtn, { backgroundColor: colors.chipBg }]}
+                disabled={!!exporting}
+                style={({ pressed }) => [
+                  styles.exportBtn,
+                  {
+                    backgroundColor: exporting === "pdf" ? colors.primary : colors.chipBg,
+                    opacity: exporting === "excel" ? 0.5 : pressed ? 0.7 : 1,
+                  },
+                ]}
                 onPress={() => startExport("pdf")}
               >
-                <Ionicons name="document-text-outline" size={16} color={colors.text} />
-                <Text style={{ color: colors.text, fontWeight: "600", marginLeft: 4 }}>PDF</Text>
+                {exporting === "pdf" ? (
+                  <>
+                    <ActivityIndicator size="small" color="#fff" />
+                    <Text style={{ color: "#fff", fontWeight: "700", marginLeft: 6 }}>Saving…</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="document-text-outline" size={16} color={colors.text} />
+                    <Text style={{ color: colors.text, fontWeight: "600", marginLeft: 4 }}>PDF</Text>
+                  </>
+                )}
               </Pressable>
               <Pressable
-                style={[styles.exportBtn, { backgroundColor: colors.chipBg }]}
+                disabled={!!exporting}
+                style={({ pressed }) => [
+                  styles.exportBtn,
+                  {
+                    backgroundColor: exporting === "excel" ? colors.primary : colors.chipBg,
+                    opacity: exporting === "pdf" ? 0.5 : pressed ? 0.7 : 1,
+                  },
+                ]}
                 onPress={() => startExport("excel")}
               >
-                <Ionicons name="grid-outline" size={16} color={colors.text} />
-                <Text style={{ color: colors.text, fontWeight: "600", marginLeft: 4 }}>Excel</Text>
+                {exporting === "excel" ? (
+                  <>
+                    <ActivityIndicator size="small" color="#fff" />
+                    <Text style={{ color: "#fff", fontWeight: "700", marginLeft: 6 }}>Saving…</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="grid-outline" size={16} color={colors.text} />
+                    <Text style={{ color: colors.text, fontWeight: "600", marginLeft: 4 }}>Excel</Text>
+                  </>
+                )}
               </Pressable>
             </View>
 
@@ -721,6 +823,28 @@ export default function MonthScreen({ route, navigation }: any) {
                 </View>
               ))
             )}
+
+            {/* Filtered total at the bottom — reflects the current filter/search */}
+            {filtered.length > 0 && (
+              <Card style={styles.footerTotal}>
+                <Text style={{ color: colors.textMuted, fontWeight: "600" }}>
+                  {filtered.length} shown
+                  {(filter !== "all" || catFilter.size > 0 || weekFilter !== null || !!search.trim()) ? " (filtered)" : ""}
+                </Text>
+                <View style={{ alignItems: "flex-end" }}>
+                  {filter !== "plus" && filteredSummary.spend > 0 && (
+                    <Text style={{ color: colors.danger, fontWeight: "800" }}>
+                      − {formatMoney(filteredSummary.spend)}
+                    </Text>
+                  )}
+                  {filter !== "minus" && filteredSummary.income > 0 && (
+                    <Text style={{ color: colors.success, fontWeight: "800" }}>
+                      + {formatMoney(filteredSummary.income)}
+                    </Text>
+                  )}
+                </View>
+              </Card>
+            )}
           </>
         ) : (
           // Saved tab
@@ -744,6 +868,7 @@ export default function MonthScreen({ route, navigation }: any) {
                   </View>
                   <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>
                     {(c.items || []).length} items
+                    {c.createdAt ? `  ·  🕐 ${formatDateTime(toJsDate(c.createdAt))}` : ""}
                   </Text>
                   {(c.items || []).map((it, idx) => (
                     <View key={idx} style={[styles.between, { marginTop: 4 }]}>
@@ -792,7 +917,9 @@ export default function MonthScreen({ route, navigation }: any) {
         </View>
       ) : (
         <Pressable style={[styles.fab, { backgroundColor: colors.primary }]} onPress={onAdd}>
-          <Ionicons name="add" size={30} color="#fff" />
+          <Animated.View style={{ transform: [{ rotate: spinDeg }] }}>
+            <Ionicons name="add" size={30} color="#fff" />
+          </Animated.View>
         </Pressable>
       )}
 
@@ -899,6 +1026,7 @@ function ExpenseRow({
   onDelete,
 }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
+  const { label: pmLabel, emoji: pmEmoji } = usePaymentMethods();
   const isPlus = exp.type === "plus";
   const cat = exp.category || DEFAULT_CATEGORY;
   return (
@@ -922,7 +1050,7 @@ function ExpenseRow({
         <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>
           {catEmoji(cat)} {catLabel(cat)}
           {exp.type === "minus" && exp.paymentMethod
-            ? `  ·  ${PAYMENT_EMOJI[exp.paymentMethod] || ""} ${PAYMENT_LABELS[exp.paymentMethod] || ""}`
+            ? `  ·  ${pmEmoji(exp.paymentMethod)} ${pmLabel(exp.paymentMethod)}`
             : ""}
         </Text>
         {!!exp.notes && (
@@ -957,6 +1085,7 @@ function ExpenseRow({
 
 function DetailsModal({ exp, type, colors, onClose }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
+  const { label: pmLabel, emoji: pmEmoji } = usePaymentMethods();
   if (!exp) return null;
   const cat = exp.category || DEFAULT_CATEGORY;
   const d = toJsDate(exp.createdAt);
@@ -965,8 +1094,11 @@ function DetailsModal({ exp, type, colors, onClose }: any) {
     ["Amount", formatMoney(exp.amount)],
     ["Category", `${catEmoji(cat)} ${catLabel(cat)}`],
   ];
-  if (exp.type === "minus" && exp.paymentMethod)
-    rows.push(["Payment", `${PAYMENT_EMOJI[exp.paymentMethod] || ""} ${PAYMENT_LABELS[exp.paymentMethod] || ""}`]);
+  if (exp.type === "minus")
+    rows.push([
+      "Payment",
+      exp.paymentMethod ? `${pmEmoji(exp.paymentMethod)} ${pmLabel(exp.paymentMethod)}` : "—",
+    ]);
   if (type !== "budget" && d) rows.push(["Week", `Week ${weekOfMonth(d)}`]);
   rows.push(["Date", formatDateTime(d)]);
   if (exp.notes) rows.push(["Notes", exp.notes]);
@@ -1035,6 +1167,12 @@ const styles = StyleSheet.create({
   search: { borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15 },
   filterRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
   filterLabel: { fontSize: 12, fontWeight: "700", marginBottom: 6, marginLeft: 2 },
+  footerTotal: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 4,
+  },
   catBreakRow: { paddingVertical: 9, paddingHorizontal: 8, borderRadius: 10 },
   catBreakTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   catBreakBottom: { flexDirection: "row", alignItems: "center", marginTop: 7 },

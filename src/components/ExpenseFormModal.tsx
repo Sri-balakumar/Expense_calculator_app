@@ -15,17 +15,13 @@ import {
 } from "react-native";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useTheme } from "../theme/ThemeContext";
-import { useCategories } from "../context/CategoriesContext";
-import ChipPicker from "./ChipPicker";
+import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
+import { usePaymentMethods, useQuickAddPayment } from "../context/PaymentMethodsContext";
+import SelectField from "./SelectField";
 import { Button } from "./UI";
-import {
-  PAYMENT_METHODS,
-  PAYMENT_LABELS,
-  PAYMENT_EMOJI,
-  DEFAULT_CATEGORY,
-  DEFAULT_PAYMENT,
-} from "../constants/categories";
+import { DEFAULT_CATEGORY, DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
+import { amountToWords } from "../util/money";
 import { Expense, ExpenseType } from "../types";
 
 export interface ExpenseFormResult {
@@ -37,12 +33,6 @@ export interface ExpenseFormResult {
   notes: string;
   dateValue: string; // YYYY-MM-DD
 }
-
-const PAYMENT_OPTIONS = PAYMENT_METHODS.map((k) => ({
-  key: k,
-  label: PAYMENT_LABELS[k],
-  emoji: PAYMENT_EMOJI[k],
-}));
 
 export default function ExpenseFormModal({
   visible,
@@ -64,6 +54,9 @@ export default function ExpenseFormModal({
   const { colors } = useTheme();
   const { options } = useCategories();
   const categoryOptions = options(true);
+  const { options: paymentOptions } = usePaymentMethods();
+  const quickAddCategory = useQuickAddCategory();
+  const quickAddPayment = useQuickAddPayment();
   const [type, setType] = useState<ExpenseType>("minus");
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
@@ -172,14 +165,35 @@ export default function ExpenseFormModal({
                 placeholderTextColor={colors.textMuted}
                 keyboardType="numeric"
               />
+              {Number(amount) > 0 && (
+                <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
+                  {amountToWords(amount)}
+                </Text>
+              )}
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Category</Text>
-              <ChipPicker options={categoryOptions} value={category} onChange={setCategory} />
+              <SelectField
+                title="Category"
+                placeholder="Select category"
+                options={categoryOptions}
+                value={category}
+                onChange={setCategory}
+                onAdd={quickAddCategory}
+                addLabel="Add category"
+              />
 
               {type === "minus" && (
                 <>
                   <Text style={[styles.label, { color: colors.textMuted }]}>Payment method</Text>
-                  <ChipPicker options={PAYMENT_OPTIONS} value={payment} onChange={setPayment} />
+                  <SelectField
+                    title="Payment method"
+                    placeholder="Select payment method"
+                    options={paymentOptions}
+                    value={payment}
+                    onChange={setPayment}
+                    onAdd={quickAddPayment}
+                    addLabel="Add payment method"
+                  />
                 </>
               )}
 

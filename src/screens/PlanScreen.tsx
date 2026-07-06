@@ -12,7 +12,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
 import { Card, Button } from "../components/UI";
-import ChipPicker from "../components/ChipPicker";
+import SelectField from "../components/SelectField";
 import PlanPayModal, { PlanPayResult } from "../components/PlanPayModal";
 import {
   getMonth,
@@ -26,17 +26,27 @@ import {
   listMonths,
   movePlans,
 } from "../firebase/firestore";
-import { formatMoney } from "../util/money";
-import { toJsDate, formatDateTime } from "../util/date";
-import { useCategories } from "../context/CategoriesContext";
+import DateTimePicker from "@react-native-community/datetimepicker";
+import { formatMoney, amountToWords } from "../util/money";
+import {
+  toJsDate,
+  formatDateTime,
+  todayStr,
+  dateToInputValue,
+  inputValueToDate,
+  inputValueToTimestamp,
+  formatDateMedium,
+} from "../util/date";
+import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { PlanDoc, Expense, MonthDoc } from "../types";
 
 export default function PlanScreen({ route }: any) {
   const { colors } = useTheme();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { confirm, toast } = useFeedback();
   const { options: catOptions } = useCategories();
   const PLAN_CAT_OPTS = catOptions(false);
+  const quickAddCategory = useQuickAddCategory();
 
   const monthId: string = route.params?.monthId;
   const monthName: string = route.params?.name || "Plan";
@@ -50,6 +60,8 @@ export default function PlanScreen({ route }: any) {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("other");
+  const [planDate, setPlanDate] = useState(todayStr());
+  const [showPlanDate, setShowPlanDate] = useState(false);
 
   // modal state
   const [pay, setPay] = useState<{ plan: PlanDoc; mode: "done" | "part" } | null>(null);
@@ -101,6 +113,7 @@ export default function PlanScreen({ route }: any) {
 
   const remaining = balance - monthSpent;
   const afterPlans = remaining - pending;
+  const mainBalance = Number(profile?.mainBalance) || 0;
 
   // ---- add ----
   const onAdd = async () => {
@@ -127,10 +140,13 @@ export default function PlanScreen({ route }: any) {
       paid: 0,
       payments: [],
       pushedExpenseId: null,
+      date: inputValueToTimestamp(planDate),
     } as any);
+    console.log("[Plan] added", { name: n, planned, category, date: planDate });
     setName("");
     setAmount("");
     setCategory("other");
+    setPlanDate(todayStr());
   };
 
   // ---- done / part-pay ----
@@ -179,6 +195,10 @@ export default function PlanScreen({ route }: any) {
     }
 
     // Part payment still records a real expense in the month.
+    // Use the name entered in the popup (defaults to the plan name), so each
+    // payment can have its own name instead of all sharing the plan's name.
+    const payName = (r.name && r.name.trim()) || p.name;
+    console.log("[Plan] part payment", { plan: p.name, payName, amount: r.amount });
     // over-balance warning
     if (r.amount > remaining) {
       const ok = await confirm({
@@ -188,25 +208,27 @@ export default function PlanScreen({ route }: any) {
       });
       if (!ok) return;
     }
+    const ts = inputValueToTimestamp(r.dateValue);
     const expId = await addExpense(user.uid, "month", monthId, {
-      name: p.name,
+      name: payName,
       amount: r.amount,
       type: "minus",
       category: r.category,
       paymentMethod: r.paymentMethod,
       notes: r.notes || `Part payment: ${monthName}`,
+      ...(ts ? { createdAt: ts } : {}),
     } as any);
 
     {
       const payments = Array.isArray(p.payments) ? p.payments.slice() : [];
       payments.push({
-        name: p.name,
+        name: payName,
         amount: r.amount,
         expenseId: expId,
         category: r.category,
         paymentMethod: r.paymentMethod,
         notes: r.notes,
-        paidAt: new Date(),
+        paidAt: inputValueToDate(r.dateValue),
       });
       const newPaid = (Number(p.paid) || 0) + r.amount;
       await updatePlan(user.uid, monthId, p.id, { paid: newPaid, payments, status: "partial" });
@@ -296,6 +318,11 @@ export default function PlanScreen({ route }: any) {
           <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 8, textAlign: "center" }}>
             Pending plans: {formatMoney(pending)}
           </Text>
+          {mainBalance > 0 && (
+            <Text style={{ color: colors.text, fontSize: 13, marginTop: 4, textAlign: "center", fontWeight: "700" }}>
+              With main balance: {formatMoney(remaining + mainBalance)}
+            </Text>
+          )}
         </Card>
 
         {/* Add row */}
@@ -316,9 +343,43 @@ export default function PlanScreen({ route }: any) {
             value={amount}
             onChangeText={setAmount}
           />
+          {Number(amount) > 0 && (
+            <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
+              {amountToWords(amount)}
+            </Text>
+          )}
           <View style={{ marginTop: 8 }}>
-            <ChipPicker options={PLAN_CAT_OPTS} value={category} onChange={setCategory} />
+            <SelectField
+              title="Category"
+              placeholder="Select category"
+              options={PLAN_CAT_OPTS}
+              value={category}
+              onChange={setCategory}
+              onAdd={quickAddCategory}
+              addLabel="Add category"
+            />
           </View>
+          <Pressable
+            onPress={() => setShowPlanDate(true)}
+            style={[
+              styles.input,
+              { borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8, justifyContent: "center" },
+            ]}
+          >
+            <Text style={{ color: colors.text, fontSize: 16 }}>
+              📅 {formatDateMedium(inputValueToDate(planDate))}
+            </Text>
+          </Pressable>
+          {showPlanDate && (
+            <DateTimePicker
+              value={inputValueToDate(planDate)}
+              mode="date"
+              onChange={(_e, d) => {
+                setShowPlanDate(false);
+                if (d) setPlanDate(dateToInputValue(d));
+              }}
+            />
+          )}
           <Button title="+ Add plan" onPress={onAdd} style={{ marginTop: 10 }} />
         </Card>
 
@@ -361,6 +422,8 @@ export default function PlanScreen({ route }: any) {
             : 0
         }
         defaultCategory={pay?.plan.category || "other"}
+        defaultName={pay?.plan.name || ""}
+        showName={pay?.mode === "part"}
         onClose={() => setPay(null)}
         onSubmit={submitPay}
         onError={(m) => toast(m, "error")}
@@ -387,7 +450,15 @@ export default function PlanScreen({ route }: any) {
               placeholderTextColor={colors.textMuted}
             />
             <View style={{ marginTop: 8 }}>
-              <ChipPicker options={PLAN_CAT_OPTS} value={editCat} onChange={setEditCat} />
+              <SelectField
+                title="Category"
+                placeholder="Select category"
+                options={PLAN_CAT_OPTS}
+                value={editCat}
+                onChange={setEditCat}
+                onAdd={quickAddCategory}
+                addLabel="Add category"
+              />
             </View>
             <View style={styles.actions}>
               <Button title="Cancel" variant="secondary" onPress={() => setEdit(null)} style={{ flex: 1 }} />
@@ -490,6 +561,11 @@ function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete
           </View>
         </View>
         <Text style={{ color: colors.textMuted, marginTop: 4 }}>{amountText}</Text>
+        {!!(p as any).date && (
+          <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 2 }}>
+            📅 {formatDateMedium(toJsDate((p as any).date))}
+          </Text>
+        )}
         {!!p.transferredFrom && (
           <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 2 }}>↪ from {p.transferredFrom}</Text>
         )}

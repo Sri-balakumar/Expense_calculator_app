@@ -10,12 +10,12 @@ import {
   View,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
-import { useTheme } from "../theme/ThemeContext";
+import { useTheme, ACCENTS } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
 import { Button, Card, Field } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
-import ChipPicker from "../components/ChipPicker";
+import SelectField from "../components/SelectField";
 import { signOutUser, updateUserProfile, changePassword, friendlyAuthError } from "../firebase/auth";
 import {
   listRecurring,
@@ -26,28 +26,36 @@ import {
   addCategory,
   updateCategory,
   deleteCategory,
+  addPaymentMethod,
+  updatePaymentMethod,
+  deletePaymentMethod,
 } from "../firebase/firestore";
-import { formatMoney } from "../util/money";
-import { CATEGORY_PALETTE } from "../constants/categories";
-import { useCategories } from "../context/CategoriesContext";
+import { formatMoney, amountToWords } from "../util/money";
+import { CATEGORY_PALETTE, CATEGORY_KEYS, PAYMENT_METHODS } from "../constants/categories";
+import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
+import { usePaymentMethods } from "../context/PaymentMethodsContext";
 import { usePin } from "../context/PinContext";
 import PinPad from "../components/PinPad";
 import { PIN_LENGTH } from "../util/pin";
 import { RecurringDoc } from "../types";
 
 export default function ProfileScreen() {
-  const { colors, mode, toggle } = useTheme();
+  const { colors, mode, toggle, accent, setAccent } = useTheme();
   const { profile, user, refreshProfile } = useAuth();
   const { confirm, toast } = useFeedback();
   const { categories, options, label: catLabel, emoji: catEmoji } = useCategories();
-  const { pinSet, setupPin, removePin } = usePin();
+  const quickAddCategory = useQuickAddCategory();
+  const { methods: paymentMethods } = usePaymentMethods();
+  const { pinSet, setupPin, removePin, verify } = usePin();
   // Budgets + recurring apply to spend categories (everything except salary).
   const budgetCats = categories.filter((c) => c.key !== "salary");
   const recCatOpts = options(false);
   const customCats = categories.filter((c) => c.custom);
+  const customPayments = paymentMethods.filter((m) => m.custom);
 
   const [name, setName] = useState(profile?.name || "");
   const [salary, setSalary] = useState(String(profile?.salary || ""));
+  const [mainBalance, setMainBalance] = useState(String(profile?.mainBalance || ""));
   const [savingProfile, setSavingProfile] = useState(false);
 
   const [curPw, setCurPw] = useState("");
@@ -63,17 +71,31 @@ export default function ProfileScreen() {
   const [recCat, setRecCat] = useState("other");
 
   const [catModal, setCatModal] = useState(false);
-  const [editCatId, setEditCatId] = useState<string | null>(null);
+  const [editCatId, setEditCatId] = useState<string | null>(null); // key being edited
+  const [editCatDocId, setEditCatDocId] = useState<string | undefined>(undefined);
   const [catName, setCatName] = useState("");
   const [catEmojiInput, setCatEmojiInput] = useState("");
   const [catColor, setCatColor] = useState(CATEGORY_PALETTE[0]);
   const [savingCat, setSavingCat] = useState(false);
+
+  // Payment methods
+  const [pmModal, setPmModal] = useState(false);
+  const [editPmId, setEditPmId] = useState<string | null>(null); // key being edited
+  const [editPmDocId, setEditPmDocId] = useState<string | undefined>(undefined);
+  const [pmName, setPmName] = useState("");
+  const [pmEmojiInput, setPmEmojiInput] = useState("");
+  const [savingPm, setSavingPm] = useState(false);
 
   const [pinModal, setPinModal] = useState(false);
   const [pinStep, setPinStep] = useState<"enter" | "confirm">("enter");
   const [pinFirst, setPinFirst] = useState("");
   const [pinValue, setPinValue] = useState("");
   const [pinError, setPinError] = useState("");
+
+  // Remove-PIN verification
+  const [removePinModal, setRemovePinModal] = useState(false);
+  const [removePinValue, setRemovePinValue] = useState("");
+  const [removePinError, setRemovePinError] = useState("");
 
   const loadLists = useCallback(async () => {
     if (!user) return;
@@ -90,6 +112,7 @@ export default function ProfileScreen() {
     useCallback(() => {
       setName(profile?.name || "");
       setSalary(String(profile?.salary || ""));
+      setMainBalance(String(profile?.mainBalance || ""));
       loadLists();
     }, [loadLists, profile])
   );
@@ -102,8 +125,13 @@ export default function ProfileScreen() {
     if (!sal || sal < 0) return toast("Enter a valid salary.", "error");
     setSavingProfile(true);
     try {
-      await updateUserProfile(user.uid, { name: n, salary: sal });
+      await updateUserProfile(user.uid, {
+        name: n,
+        salary: sal,
+        mainBalance: Number(mainBalance) || 0,
+      });
       await refreshProfile();
+      console.log("[Profile] saved", { name: n, salary: sal, mainBalance: Number(mainBalance) || 0 });
       toast("Profile updated!", "success");
     } catch (err: any) {
       toast(err?.message || "Update failed.", "error");
@@ -141,6 +169,7 @@ export default function ProfileScreen() {
 
   const openCatModal = () => {
     setEditCatId(null);
+    setEditCatDocId(undefined);
     setCatName("");
     setCatEmojiInput("");
     // Pick a palette color not already used by a custom category, if possible.
@@ -149,8 +178,15 @@ export default function ProfileScreen() {
     setCatModal(true);
   };
 
-  const openEditCat = (c: { key: string; label: string; emoji: string; color: string }) => {
+  const openEditCat = (c: {
+    key: string;
+    label: string;
+    emoji: string;
+    color: string;
+    docId?: string;
+  }) => {
     setEditCatId(c.key);
+    setEditCatDocId(c.docId);
     setCatName(c.label);
     setCatEmojiInput(c.emoji);
     setCatColor(c.color);
@@ -169,10 +205,16 @@ export default function ProfileScreen() {
     try {
       const data = { label: n, emoji: catEmojiInput.trim() || "📌", color: catColor };
       if (editCatId) {
-        await updateCategory(user.uid, editCatId, data);
+        if (editCatDocId) {
+          // Custom or already-overridden default → update its doc.
+          await updateCategory(user.uid, editCatDocId, data);
+        } else {
+          // Plain built-in default → create an override keyed by its key.
+          await addCategory(user.uid, { ...data, key: editCatId } as any);
+        }
         toast("Category updated", "success");
       } else {
-        await addCategory(user.uid, data);
+        await addCategory(user.uid, data); // brand-new category (no key)
         toast("Category added", "success");
       }
       setCatModal(false);
@@ -183,16 +225,104 @@ export default function ProfileScreen() {
     }
   };
 
-  const removeCat = async (key: string, label: string) => {
+  const removeCat = async (cat: { key: string; label: string; emoji: string; color: string; docId?: string }) => {
     if (!user) return;
+    const isDefault = CATEGORY_KEYS.includes(cat.key);
     const ok = await confirm({
-      title: `Delete "${label}"?`,
-      message: "Existing entries keep this category but it won't be selectable for new ones.",
+      title: `Delete "${cat.label}"?`,
+      message: isDefault
+        ? "It won't be selectable for new entries (existing ones keep it). You can re-add it later."
+        : "Existing entries keep it but it won't be selectable for new ones.",
       confirmText: "Delete",
     });
     if (!ok) return;
-    await deleteCategory(user.uid, key);
+    if (isDefault) {
+      // Hide the built-in: mark its override doc hidden, or create a hidden one.
+      if (cat.docId) await updateCategory(user.uid, cat.docId, { hidden: true } as any);
+      else
+        await addCategory(user.uid, {
+          key: cat.key,
+          hidden: true,
+          label: cat.label,
+          emoji: cat.emoji,
+          color: cat.color,
+        } as any);
+    } else if (cat.docId) {
+      await deleteCategory(user.uid, cat.docId);
+    }
+    console.log("[Category] removed", cat.key);
     toast("Category removed", "success");
+  };
+
+  // ---- payment methods ----
+  const openPmModal = () => {
+    setEditPmId(null);
+    setEditPmDocId(undefined);
+    setPmName("");
+    setPmEmojiInput("");
+    setPmModal(true);
+  };
+  const openEditPm = (m: { key: string; label: string; emoji: string; docId?: string }) => {
+    setEditPmId(m.key);
+    setEditPmDocId(m.docId);
+    setPmName(m.label);
+    setPmEmojiInput(m.emoji);
+    setPmModal(true);
+  };
+  const savePm = async () => {
+    if (!user) return;
+    const n = pmName.trim();
+    if (!n) return toast("Enter a name.", "error");
+    const dupe = paymentMethods.some(
+      (m) => m.key !== editPmId && m.label.toLowerCase() === n.toLowerCase()
+    );
+    if (dupe) return toast("A payment method with that name already exists.", "error");
+    setSavingPm(true);
+    try {
+      const data = { label: n, emoji: pmEmojiInput.trim() || "💳" };
+      if (editPmId) {
+        if (editPmDocId) {
+          await updatePaymentMethod(user.uid, editPmDocId, data);
+        } else {
+          await addPaymentMethod(user.uid, { ...data, key: editPmId } as any);
+        }
+        toast("Payment method updated", "success");
+      } else {
+        await addPaymentMethod(user.uid, data);
+        toast("Payment method added", "success");
+      }
+      setPmModal(false);
+    } catch (err: any) {
+      toast(err?.message || "Couldn't save payment method.", "error");
+    } finally {
+      setSavingPm(false);
+    }
+  };
+  const removePm = async (m: { key: string; label: string; emoji: string; docId?: string }) => {
+    if (!user) return;
+    const isDefault = PAYMENT_METHODS.includes(m.key);
+    const ok = await confirm({
+      title: `Delete "${m.label}"?`,
+      message: isDefault
+        ? "It won't be selectable for new entries. You can re-add it later."
+        : "Existing entries keep it but it won't be selectable for new ones.",
+      confirmText: "Delete",
+    });
+    if (!ok) return;
+    if (isDefault) {
+      if (m.docId) await updatePaymentMethod(user.uid, m.docId, { hidden: true } as any);
+      else
+        await addPaymentMethod(user.uid, {
+          key: m.key,
+          hidden: true,
+          label: m.label,
+          emoji: m.emoji,
+        } as any);
+    } else if (m.docId) {
+      await deletePaymentMethod(user.uid, m.docId);
+    }
+    console.log("[Payment] removed", m.key);
+    toast("Payment method removed", "success");
   };
 
   // ---- App lock (PIN) ----
@@ -246,14 +376,26 @@ export default function ProfileScreen() {
     await signOutUser();
   };
 
-  const removePinFlow = async () => {
-    const ok = await confirm({
-      title: "Remove PIN?",
-      message: "The app will no longer ask for a PIN on launch.",
-      confirmText: "Remove",
-    });
-    if (!ok) return;
+  // Require the current PIN before removing app lock.
+  const removePinFlow = () => {
+    setRemovePinValue("");
+    setRemovePinError("");
+    setRemovePinModal(true);
+  };
+  const onRemovePinChange = async (v: string) => {
+    setRemovePinError("");
+    setRemovePinValue(v);
+    if (v.length < PIN_LENGTH) return;
+    const ok = await verify(v);
+    if (!ok) {
+      console.log("[Pin] remove: wrong PIN");
+      setRemovePinError("Wrong PIN. Try again.");
+      setRemovePinValue("");
+      return;
+    }
     await removePin();
+    setRemovePinModal(false);
+    console.log("[Pin] removed after verification");
     toast("PIN removed", "success");
   };
 
@@ -289,6 +431,23 @@ export default function ProfileScreen() {
         <Text style={[styles.cardTitle, { color: colors.text }]}>Personal info</Text>
         <Field label="Name" value={name} onChangeText={setName} />
         <Field label="Monthly salary (₹)" value={salary} onChangeText={setSalary} keyboardType="numeric" />
+        {Number(salary) > 0 && (
+          <Text style={{ color: colors.primary, fontSize: 12, marginTop: -8, marginBottom: 10, fontStyle: "italic" }}>
+            {amountToWords(salary)} only
+          </Text>
+        )}
+        <Field
+          label="Main balance (₹) — savings, not spent from months"
+          value={mainBalance}
+          onChangeText={setMainBalance}
+          keyboardType="numeric"
+          placeholder="e.g. 3000"
+        />
+        {Number(mainBalance) > 0 && (
+          <Text style={{ color: colors.primary, fontSize: 12, marginTop: -8, marginBottom: 10, fontStyle: "italic" }}>
+            {amountToWords(mainBalance)} only
+          </Text>
+        )}
         <View style={styles.between}>
           <Text style={{ color: colors.textMuted }}>Email</Text>
           <Text style={{ color: colors.text, fontWeight: "600" }}>{user?.email || "—"}</Text>
@@ -338,40 +497,31 @@ export default function ProfileScreen() {
         />
       </Card>
 
-      {/* Categories */}
+      {/* Payment methods */}
       <Card>
-        <Text style={[styles.cardTitle, { color: colors.text }]}>Categories</Text>
+        <Text style={[styles.cardTitle, { color: colors.text }]}>Payment methods</Text>
         <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 10 }}>
-          Your own categories show up everywhere you pick one (expenses, plans, budgets).
+          Built-in methods plus your own — these show up wherever you pick one.
         </Text>
-        {customCats.length === 0 ? (
-          <Text style={{ color: colors.textMuted, textAlign: "center", paddingVertical: 8 }}>
-            No custom categories yet.
-          </Text>
-        ) : (
-          customCats.map((c) => (
-            <View key={c.key} style={styles.recRow}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 1 }}>
-                <View style={[styles.swatch, { backgroundColor: c.color }]} />
-                <Text style={{ color: colors.text }}>
-                  {c.emoji} {c.label}
-                </Text>
-              </View>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
-                <Pressable onPress={() => openEditCat(c)} hitSlop={8}>
-                  <Text style={{ color: colors.primary, fontWeight: "700" }}>Edit</Text>
-                </Pressable>
-                <Pressable onPress={() => removeCat(c.key, c.label)} hitSlop={8}>
-                  <Text style={{ color: colors.danger, fontWeight: "700" }}>✕</Text>
-                </Pressable>
-              </View>
+        {paymentMethods.map((m) => (
+          <View key={m.key} style={styles.recRow}>
+            <Text style={{ color: colors.text, flexShrink: 1 }}>
+              {m.emoji} {m.label}
+            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
+              <Pressable onPress={() => openEditPm(m)} hitSlop={8}>
+                <Text style={{ fontSize: 16 }}>✏️</Text>
+              </Pressable>
+              <Pressable onPress={() => removePm(m)} hitSlop={8}>
+                <Text style={{ fontSize: 18 }}>🗑️</Text>
+              </Pressable>
             </View>
-          ))
-        )}
+          </View>
+        ))}
         <Button
-          title="+ Add category"
+          title="+ Add payment method"
           variant="secondary"
-          onPress={openCatModal}
+          onPress={openPmModal}
           style={{ marginTop: 10 }}
         />
       </Card>
@@ -384,7 +534,7 @@ export default function ProfileScreen() {
         </Text>
         {budgetCats.map((c) => (
           <View key={c.key} style={styles.budgetRow}>
-            <Text style={{ color: colors.text }}>
+            <Text style={{ color: colors.text, flex: 1 }} numberOfLines={1}>
               {c.emoji} {c.label}
             </Text>
             <TextInput
@@ -399,8 +549,22 @@ export default function ProfileScreen() {
               onChangeText={(t) => setBudgetInputs((prev) => ({ ...prev, [c.key]: t }))}
               onEndEditing={() => saveBudget(c.key, budgetInputs[c.key] ?? "")}
             />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginLeft: 10 }}>
+              <Pressable onPress={() => openEditCat(c)} hitSlop={8}>
+                <Text style={{ fontSize: 16 }}>✏️</Text>
+              </Pressable>
+              <Pressable onPress={() => removeCat(c)} hitSlop={8}>
+                <Text style={{ fontSize: 18 }}>🗑️</Text>
+              </Pressable>
+            </View>
           </View>
         ))}
+        <Button
+          title="+ Add category"
+          variant="secondary"
+          onPress={openCatModal}
+          style={{ marginTop: 12 }}
+        />
       </Card>
 
       {/* App lock */}
@@ -424,8 +588,32 @@ export default function ProfileScreen() {
       {/* Theme + logout */}
       <Card>
         <View style={styles.between}>
-          <Text style={{ color: colors.text, fontWeight: "600" }}>Dark mode</Text>
-          <Switch value={mode === "dark"} onValueChange={toggle} />
+          <Text style={{ color: colors.text, fontWeight: "600" }}>
+            Appearance · {mode === "dark" ? "Dark" : "Light"}
+          </Text>
+          <Pressable
+            onPress={toggle}
+            hitSlop={10}
+            style={[styles.themeBtn, { backgroundColor: colors.chipBg }]}
+          >
+            <Text style={{ fontSize: 22 }}>{mode === "dark" ? "🌙" : "☀️"}</Text>
+          </Pressable>
+        </View>
+
+        <Text style={{ color: colors.textMuted, fontWeight: "600", marginTop: 16, marginBottom: 10 }}>
+          Accent color
+        </Text>
+        <View style={styles.palette}>
+          {ACCENTS.map((c) => (
+            <Pressable
+              key={c}
+              onPress={() => setAccent(c)}
+              style={[
+                styles.paletteDot,
+                { backgroundColor: c, borderColor: accent === c ? colors.text : "transparent" },
+              ]}
+            />
+          ))}
         </View>
       </Card>
       <Button title="Log out" variant="danger" onPress={onLogout} />
@@ -438,7 +626,15 @@ export default function ProfileScreen() {
             <Field label="Name" value={recName} onChangeText={setRecName} placeholder="e.g. Rent" />
             <Field label="Amount (₹)" value={recAmount} onChangeText={setRecAmount} keyboardType="numeric" placeholder="e.g. 15000" />
             <Text style={{ color: colors.textMuted, fontSize: 13, fontWeight: "600", marginBottom: 6 }}>Category</Text>
-            <ChipPicker options={recCatOpts} value={recCat} onChange={setRecCat} />
+            <SelectField
+              title="Category"
+              placeholder="Select category"
+              options={recCatOpts}
+              value={recCat}
+              onChange={setRecCat}
+              onAdd={quickAddCategory}
+              addLabel="Add category"
+            />
             <View style={styles.actions}>
               <Button title="Cancel" variant="secondary" onPress={() => setRecModal(false)} style={{ flex: 1 }} />
               <Button title="Add" onPress={addRec} style={{ flex: 1 }} />
@@ -493,6 +689,39 @@ export default function ProfileScreen() {
         </Pressable>
       </Modal>
 
+      {/* Add / edit payment method modal */}
+      <Modal visible={pmModal} transparent animationType="fade" onRequestClose={() => setPmModal(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setPmModal(false)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>
+              {editPmId ? "Edit payment method" : "New payment method"}
+            </Text>
+            <View style={{ flexDirection: "row", gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Field label="Name" value={pmName} onChangeText={setPmName} placeholder="e.g. PhonePe" />
+              </View>
+              <View style={{ width: 90 }}>
+                <Field
+                  label="Emoji"
+                  value={pmEmojiInput}
+                  onChangeText={(t) => setPmEmojiInput(t.slice(0, 2))}
+                  placeholder="💳"
+                />
+              </View>
+            </View>
+            <View style={styles.actions}>
+              <Button title="Cancel" variant="secondary" onPress={() => setPmModal(false)} style={{ flex: 1 }} />
+              <Button
+                title={editPmId ? "Save" : "Add"}
+                onPress={savePm}
+                loading={savingPm}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* PIN setup modal */}
       <Modal visible={pinModal} transparent animationType="fade" onRequestClose={closePinModal}>
         <Pressable style={styles.backdrop} onPress={closePinModal}>
@@ -520,6 +749,37 @@ export default function ProfileScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Remove-PIN verification modal */}
+      <Modal
+        visible={removePinModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRemovePinModal(false)}
+      >
+        <Pressable style={styles.backdrop} onPress={() => setRemovePinModal(false)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg, alignItems: "center" }]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Enter PIN to remove</Text>
+            <Text
+              style={{
+                color: removePinError ? colors.danger : colors.textMuted,
+                fontSize: 13,
+                marginBottom: 18,
+                textAlign: "center",
+              }}
+            >
+              {removePinError || "Confirm your current PIN to turn off app lock"}
+            </Text>
+            <PinPad value={removePinValue} onChange={onRemovePinChange} error={!!removePinError} />
+            <Button
+              title="Cancel"
+              variant="secondary"
+              onPress={() => setRemovePinModal(false)}
+              style={{ marginTop: 24, alignSelf: "stretch" }}
+            />
+          </Pressable>
+        </Pressable>
+      </Modal>
       </ScrollView>
     </View>
   );
@@ -527,6 +787,7 @@ export default function ProfileScreen() {
 
 const styles = StyleSheet.create({
   h: { fontSize: 24, fontWeight: "800", letterSpacing: -0.3, marginBottom: 16 },
+  themeBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   cardTitle: { fontSize: 16, fontWeight: "600", marginBottom: 10 },
   between: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 6 },
   recRow: {

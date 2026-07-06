@@ -33,6 +33,7 @@ export default function MonthlyScreen({ navigation }: any) {
   const [picker, setPicker] = useState(false);
 
   const salary = Number(profile?.salary) || 0;
+  const mainBalance = Number(profile?.mainBalance) || 0;
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -110,7 +111,16 @@ export default function MonthlyScreen({ navigation }: any) {
         style={[styles.gHeader, { paddingTop: insets.top + 16 }]}
       >
         <Text style={styles.gHi}>Hi, {profile?.name || "there"} 👋</Text>
-        <Text style={styles.gSalary}>Monthly salary · {formatMoney(salary)}</Text>
+        <View style={styles.pillRow}>
+          <View style={styles.hPill}>
+            <Text style={styles.hPillText}>💰 Salary  {formatMoney(salary)}</Text>
+          </View>
+          {mainBalance > 0 && (
+            <View style={styles.hPill}>
+              <Text style={styles.hPillText}>🏦 Main  {formatMoney(mainBalance)}</Text>
+            </View>
+          )}
+        </View>
         {current && (
           <View style={styles.gHero}>
             <Text style={styles.gHeroLabel}>Spent in {current.name}</Text>
@@ -153,25 +163,6 @@ export default function MonthlyScreen({ navigation }: any) {
             </Card>
           )}
 
-          {barData.length >= 2 && (
-            <Card>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Spending trend</Text>
-              <BarChart
-                data={barData}
-                width={chartWidth}
-                height={160}
-                barWidth={Math.max(18, chartWidth / (barData.length * 2.2))}
-                spacing={18}
-                noOfSections={4}
-                yAxisThickness={0}
-                xAxisThickness={0}
-                hideRules
-                yAxisTextStyle={{ color: colors.textMuted, fontSize: 10 }}
-                xAxisLabelTextStyle={{ color: colors.textMuted, fontSize: 10 }}
-                frontColor={colors.primary}
-              />
-            </Card>
-          )}
 
           <Pressable
             style={({ pressed }) => [
@@ -250,7 +241,14 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 26,
   },
   gHi: { color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.2 },
-  gSalary: { color: "rgba(255,255,255,0.82)", fontSize: 13, marginTop: 3 },
+  pillRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  hPill: {
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  hPillText: { color: "#fff", fontSize: 13, fontWeight: "700" },
   gHero: { marginTop: 18 },
   gHeroLabel: { color: "rgba(255,255,255,0.78)", fontSize: 13 },
   gHeroAmount: { color: "#fff", fontSize: 30, fontWeight: "800", marginTop: 2, letterSpacing: -0.4 },

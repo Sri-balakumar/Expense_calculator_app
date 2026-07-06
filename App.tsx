@@ -7,6 +7,7 @@ import { ThemeProvider, useTheme } from "./src/theme/ThemeContext";
 import { FeedbackProvider } from "./src/components/Feedback";
 import { AuthProvider } from "./src/context/AuthContext";
 import { CategoriesProvider } from "./src/context/CategoriesContext";
+import { PaymentMethodsProvider } from "./src/context/PaymentMethodsContext";
 import { PinProvider } from "./src/context/PinContext";
 import RootNavigator from "./src/navigation/RootNavigator";
 import { FONT_ASSETS, applyGlobalFont } from "./src/theme/fonts";
@@ -41,9 +42,11 @@ export default function App() {
         <FeedbackProvider>
           <AuthProvider>
             <CategoriesProvider>
-              <PinProvider>
-                <ThemedApp />
-              </PinProvider>
+              <PaymentMethodsProvider>
+                <PinProvider>
+                  <ThemedApp />
+                </PinProvider>
+              </PaymentMethodsProvider>
             </CategoriesProvider>
           </AuthProvider>
         </FeedbackProvider>
