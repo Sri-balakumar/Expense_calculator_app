@@ -11,15 +11,17 @@ import {
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTheme, ACCENTS } from "../theme/ThemeContext";
+import { useCurrency } from "../context/CurrencyContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
-import { Button, Card, Field } from "../components/UI";
+import { Button, Card, Field, MoneyInput } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
 import SelectField from "../components/SelectField";
 import { signOutUser, updateUserProfile, changePassword, friendlyAuthError } from "../firebase/auth";
 import {
   listRecurring,
   addRecurring,
+  updateRecurring,
   deleteRecurring,
   getCategoryBudgets,
   setCategoryBudget,
@@ -47,6 +49,10 @@ export default function ProfileScreen() {
   const quickAddCategory = useQuickAddCategory();
   const { methods: paymentMethods } = usePaymentMethods();
   const { pinSet, setupPin, removePin, verify } = usePin();
+  const { code: curCode, symbol: curSymbol, currencies, setCurrency } = useCurrency();
+  const [pickedCur, setPickedCur] = useState(curCode); // pending currency choice (Save to apply)
+  const [curModal, setCurModal] = useState(false);
+  const [curSearch, setCurSearch] = useState("");
   // Budgets + recurring apply to spend categories (everything except salary).
   const budgetCats = categories.filter((c) => c.key !== "salary");
   const recCatOpts = options(false);
@@ -69,6 +75,7 @@ export default function ProfileScreen() {
   const [recName, setRecName] = useState("");
   const [recAmount, setRecAmount] = useState("");
   const [recCat, setRecCat] = useState("other");
+  const [editRecId, setEditRecId] = useState<string | null>(null); // null = adding
 
   const [catModal, setCatModal] = useState(false);
   const [editCatId, setEditCatId] = useState<string | null>(null); // key being edited
@@ -152,18 +159,43 @@ export default function ProfileScreen() {
     }
   };
 
-  const addRec = async () => {
+  const openRecModal = () => {
+    setEditRecId(null);
+    setRecName("");
+    setRecAmount("");
+    setRecCat("other");
+    setRecModal(true);
+  };
+
+  const openEditRec = (r: RecurringDoc) => {
+    setEditRecId(r.id);
+    setRecName(r.name || "");
+    setRecAmount(String(Number(r.amount) || ""));
+    setRecCat(r.category || "other");
+    setRecModal(true);
+    console.log("[Profile] edit recurring", r.id);
+  };
+
+  const saveRec = async () => {
     if (!user) return;
     const n = recName.trim();
     const amt = Number(recAmount);
     if (!n) return toast("Enter a name.", "error");
     if (!amt || amt <= 0) return toast("Enter a valid amount.", "error");
-    await addRecurring(user.uid, { name: n, amount: amt, category: recCat });
+    if (editRecId) {
+      await updateRecurring(user.uid, editRecId, { name: n, amount: amt, category: recCat });
+      console.log("[Profile] recurring updated", editRecId);
+      toast("Recurring updated", "success");
+    } else {
+      await addRecurring(user.uid, { name: n, amount: amt, category: recCat });
+      console.log("[Profile] recurring added", n);
+      toast("Recurring added", "success");
+    }
     setRecModal(false);
+    setEditRecId(null);
     setRecName("");
     setRecAmount("");
     setRecCat("other");
-    toast("Recurring added", "success");
     loadLists();
   };
 
@@ -430,7 +462,7 @@ export default function ProfileScreen() {
       <Card>
         <Text style={[styles.cardTitle, { color: colors.text }]}>Personal info</Text>
         <Field label="Name" value={name} onChangeText={setName} />
-        <Field label="Monthly salary (₹)" value={salary} onChangeText={setSalary} keyboardType="numeric" />
+        <Field label="Monthly salary (₹)" money value={salary} onChangeText={setSalary} keyboardType="numeric" />
         {Number(salary) > 0 && (
           <Text style={{ color: colors.primary, fontSize: 12, marginTop: -8, marginBottom: 10, fontStyle: "italic" }}>
             {amountToWords(salary)} only
@@ -438,6 +470,7 @@ export default function ProfileScreen() {
         )}
         <Field
           label="Main balance (₹) — savings, not spent from months"
+          money
           value={mainBalance}
           onChangeText={setMainBalance}
           keyboardType="numeric"
@@ -480,10 +513,13 @@ export default function ProfileScreen() {
                   {catLabel(r.category)}
                 </Text>
               </Text>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
                 <Text style={{ color: colors.text, fontWeight: "700" }}>{formatMoney(r.amount)}</Text>
+                <Pressable onPress={() => openEditRec(r)} hitSlop={8}>
+                  <Text style={{ fontSize: 16 }}>✏️</Text>
+                </Pressable>
                 <Pressable onPress={() => removeRec(r)} hitSlop={8}>
-                  <Text style={{ color: colors.danger, fontWeight: "700" }}>✕</Text>
+                  <Text style={{ fontSize: 18 }}>🗑️</Text>
                 </Pressable>
               </View>
             </View>
@@ -492,7 +528,7 @@ export default function ProfileScreen() {
         <Button
           title="+ Add recurring expense"
           variant="secondary"
-          onPress={() => setRecModal(true)}
+          onPress={openRecModal}
           style={{ marginTop: 10 }}
         />
       </Card>
@@ -537,14 +573,12 @@ export default function ProfileScreen() {
             <Text style={{ color: colors.text, flex: 1 }} numberOfLines={1}>
               {c.emoji} {c.label}
             </Text>
-            <TextInput
+            <MoneyInput
               style={[
                 styles.budgetInput,
                 { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg },
               ]}
-              keyboardType="numeric"
               placeholder="No limit"
-              placeholderTextColor={colors.textMuted}
               value={budgetInputs[c.key] ?? ""}
               onChangeText={(t) => setBudgetInputs((prev) => ({ ...prev, [c.key]: t }))}
               onEndEditing={() => saveBudget(c.key, budgetInputs[c.key] ?? "")}
@@ -616,15 +650,39 @@ export default function ProfileScreen() {
           ))}
         </View>
       </Card>
+
+      {/* Currency */}
+      <Card>
+        <Text style={[styles.cardTitle, { color: colors.text }]}>Currency</Text>
+        <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 10 }}>
+          Pick one — it shows on every amount across the app.
+        </Text>
+        <Pressable
+          style={[styles.curField, { backgroundColor: colors.inputBg, borderColor: colors.border }]}
+          onPress={() => {
+            setPickedCur(curCode);
+            setCurSearch("");
+            setCurModal(true);
+          }}
+        >
+          <Text style={{ color: colors.text, fontSize: 16, fontWeight: "600" }}>
+            {curSymbol.trim()}  {curCode}
+          </Text>
+          <Text style={{ color: colors.textMuted, fontSize: 14 }}>▾</Text>
+        </Pressable>
+      </Card>
+
       <Button title="Log out" variant="danger" onPress={onLogout} />
 
       {/* Add recurring modal */}
       <Modal visible={recModal} transparent animationType="fade" onRequestClose={() => setRecModal(false)}>
         <Pressable style={styles.backdrop} onPress={() => setRecModal(false)}>
           <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
-            <Text style={[styles.cardTitle, { color: colors.text }]}>Add recurring</Text>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>
+              {editRecId ? "Edit recurring" : "Add recurring"}
+            </Text>
             <Field label="Name" value={recName} onChangeText={setRecName} placeholder="e.g. Rent" />
-            <Field label="Amount (₹)" value={recAmount} onChangeText={setRecAmount} keyboardType="numeric" placeholder="e.g. 15000" />
+            <Field label="Amount (₹)" money value={recAmount} onChangeText={setRecAmount} keyboardType="numeric" placeholder="e.g. 15000" />
             <Text style={{ color: colors.textMuted, fontSize: 13, fontWeight: "600", marginBottom: 6 }}>Category</Text>
             <SelectField
               title="Category"
@@ -637,7 +695,7 @@ export default function ProfileScreen() {
             />
             <View style={styles.actions}>
               <Button title="Cancel" variant="secondary" onPress={() => setRecModal(false)} style={{ flex: 1 }} />
-              <Button title="Add" onPress={addRec} style={{ flex: 1 }} />
+              <Button title={editRecId ? "Save" : "Add"} onPress={saveRec} style={{ flex: 1 }} />
             </View>
           </Pressable>
         </Pressable>

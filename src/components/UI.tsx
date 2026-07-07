@@ -12,6 +12,7 @@ import {
   ViewProps,
 } from "react-native";
 import { useTheme } from "../theme/ThemeContext";
+import { currencySymbol } from "../util/money";
 
 export function Card({ style, children, ...rest }: ViewProps) {
   const { colors } = useTheme();
@@ -79,9 +80,10 @@ export function Button({
 export function Field({
   label,
   isPassword,
+  money,
   style,
   ...rest
-}: TextInputProps & { label?: string; isPassword?: boolean }) {
+}: TextInputProps & { label?: string; isPassword?: boolean; money?: boolean }) {
   const { colors } = useTheme();
   const [hidden, setHidden] = useState(true);
   const [focused, setFocused] = useState(false);
@@ -99,6 +101,7 @@ export function Field({
               backgroundColor: colors.inputBg,
               borderColor: focused ? colors.primary : "transparent",
               paddingRight: isPassword ? 60 : 14,
+              paddingLeft: money ? 32 : 14,
             },
             style,
           ]}
@@ -120,6 +123,9 @@ export function Field({
             rest.onBlur?.(e);
           }}
         />
+        {money && (
+          <Text style={[styles.rupee, { color: colors.textMuted }]}>{currencySymbol()}</Text>
+        )}
         {isPassword && (
           <Pressable
             style={styles.eye}
@@ -132,6 +138,23 @@ export function Field({
           </Pressable>
         )}
       </View>
+    </View>
+  );
+}
+
+// A raw numeric input with a ₹ prefix — drop-in for amount `<TextInput>`s that
+// carry their own container style (border/background). Pass that style through.
+export function MoneyInput({ style, ...rest }: TextInputProps) {
+  const { colors } = useTheme();
+  return (
+    <View style={{ justifyContent: "center" }}>
+      <TextInput
+        keyboardType="numeric"
+        placeholderTextColor={colors.textMuted}
+        {...rest}
+        style={[style, { paddingLeft: 32 }]}
+      />
+      <Text style={[styles.rupee, { color: colors.textMuted }]}>{currencySymbol()}</Text>
     </View>
   );
 }
@@ -165,4 +188,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   eye: { position: "absolute", right: 14 },
+  rupee: { position: "absolute", left: 14, fontSize: 16, fontWeight: "700" },
 });

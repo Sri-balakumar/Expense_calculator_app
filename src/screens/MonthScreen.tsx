@@ -14,8 +14,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
-import { Card } from "../components/UI";
+import { Card, Button } from "../components/UI";
 import Calculator from "../components/Calculator";
+import DownloadAnimation from "../components/DownloadAnimation";
 import ExpenseFormModal, { ExpenseFormResult } from "../components/ExpenseFormModal";
 import MultiSelectField from "../components/MultiSelectField";
 import {
@@ -31,6 +32,10 @@ import {
   addSavedCalc,
   deleteSavedCalc,
   SavedCalc,
+  getPlans,
+  watchPlans,
+  addPlan,
+  updatePlan,
 } from "../firebase/firestore";
 import { formatMoney } from "../util/money";
 import { exportPdf, exportExcel, attendedWeeks } from "../util/export";
@@ -45,7 +50,7 @@ import {
 import { DEFAULT_CATEGORY } from "../constants/categories";
 import { useCategories } from "../context/CategoriesContext";
 import { usePaymentMethods } from "../context/PaymentMethodsContext";
-import { Expense } from "../types";
+import { Expense, PlanDoc } from "../types";
 
 export default function MonthScreen({ route, navigation }: any) {
   const { colors } = useTheme();
@@ -90,12 +95,23 @@ export default function MonthScreen({ route, navigation }: any) {
   const [calc, setCalc] = useState<{ value: number; title: string; expr?: string } | null>(null);
   const [details, setDetails] = useState<Expense | null>(null);
 
+  // Assign monthly expense(s) to a plan (link them — the expenses stay in Monthly).
+  const [assignExps, setAssignExps] = useState<Expense[]>([]);
+  const [assignPlans, setAssignPlans] = useState<PlanDoc[]>([]);
+  const [assignPlanId, setAssignPlanId] = useState<string | null>(null);
+  const [assignShowNew, setAssignShowNew] = useState(false);
+  const [assignNewName, setAssignNewName] = useState("");
+  const assignTotal = assignExps.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  // Expense ids already linked to a plan → don't offer "Assign" for them again.
+  const [linkedExpenseIds, setLinkedExpenseIds] = useState<Set<string>>(new Set());
+
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const [exportFmt, setExportFmt] = useState<null | "pdf" | "excel">(null);
   const [exporting, setExporting] = useState<null | "pdf" | "excel">(null);
   const exportingRef = useRef(false); // synchronous re-entry guard
+  const [downloadDone, setDownloadDone] = useState<null | "pdf" | "excel">(null);
   const [weekSel, setWeekSel] = useState<Set<number>>(new Set());
 
   // --- load tracker doc + subscribe to expenses/saved calcs ---
@@ -144,6 +160,25 @@ export default function MonthScreen({ route, navigation }: any) {
       unsubExp?.();
       unsubCalc?.();
     };
+  }, [user, id, type]);
+
+  // Track which expenses are already linked to a plan (to hide "Assign" for them).
+  useEffect(() => {
+    if (!user || type !== "month") {
+      setLinkedExpenseIds(new Set());
+      return;
+    }
+    const unsub = watchPlans(user.uid, id, (list) => {
+      const ids = new Set<string>();
+      list.forEach((p) => {
+        (Array.isArray(p.payments) ? p.payments : []).forEach((pay: any) => {
+          if (pay.expenseId) ids.add(pay.expenseId);
+        });
+      });
+      setLinkedExpenseIds(ids);
+      console.log("[Month] linked-to-plan expense ids", ids.size);
+    });
+    return () => unsub();
   }, [user, id, type]);
 
   // --- totals ---
@@ -229,12 +264,14 @@ export default function MonthScreen({ route, navigation }: any) {
       return [{ week: null as number | null, items: filtered }];
     }
     const map = new Map<number, Expense[]>();
-    // chronological for week order (oldest first)
-    [...filtered].reverse().forEach((e) => {
+    // `filtered` is newest-first, so keep that order: newest week first and the
+    // last-added entry sits at the very top of its week.
+    filtered.forEach((e) => {
       const wk = weekOfMonth(toJsDate(e.createdAt));
       if (!map.has(wk)) map.set(wk, []);
       map.get(wk)!.push(e);
     });
+    console.log("[Month] grouped newest-first, weeks:", Array.from(map.keys()));
     return Array.from(map.entries()).map(([week, items]) => ({ week, items }));
   }, [filtered, isBudget, filter, catFilter, weekFilter, search]);
 
@@ -332,6 +369,84 @@ export default function MonthScreen({ route, navigation }: any) {
     if (!ok) return;
     await deleteExpense(user.uid, type, id, exp.id);
     toast("Deleted", "success");
+  };
+
+  // ---- assign expense(s) to a plan (link) ----
+  const openAssign = async (exps: Expense[]) => {
+    if (!user || type !== "month" || exps.length === 0) return;
+    setDetails(null);
+    setAssignPlanId(null);
+    setAssignShowNew(false);
+    setAssignNewName("");
+    setAssignExps(exps);
+    try {
+      const ps = await getPlans(user.uid, id);
+      setAssignPlans(ps);
+      console.log("[Month] assign: loaded plans", ps.length, "for", exps.length, "entries");
+    } catch (e) {
+      console.log("[Month] assign: loadPlans failed", e);
+      setAssignPlans([]);
+    }
+  };
+
+  // Assign the current multi-selection to a plan (skip income + already-assigned).
+  const assignSelection = () => {
+    const sel = expenses.filter((e) => selected.has(e.id));
+    const hasIncome = sel.some((e) => e.type === "plus");
+    const exps = sel.filter((e) => e.type === "minus" && !linkedExpenseIds.has(e.id));
+    if (exps.length === 0) {
+      if (hasIncome) return toast("Only spends can be added to plans.", "error");
+      return toast("Select spend entries that aren't already in a plan.", "error");
+    }
+    exitSelect();
+    openAssign(exps);
+  };
+
+  const doAssign = async () => {
+    if (!user || assignExps.length === 0) return;
+    let plan = assignPlanId ? assignPlans.find((p) => p.id === assignPlanId) : null;
+    if (!plan) {
+      // Create a new plan sized to the selected total, then link into it.
+      const pn = assignNewName.trim() || assignExps[0].name;
+      const pid = await addPlan(user.uid, id, {
+        name: pn,
+        planned: assignTotal,
+        category: assignExps[0].category || "other",
+        status: "pending",
+        actual: null,
+        paid: 0,
+        payments: [],
+        pushedExpenseId: null,
+      } as any);
+      plan = { id: pid, name: pn, planned: assignTotal, paid: 0, payments: [], status: "pending" } as any;
+      console.log("[Month] assign: created plan", { pid, pn });
+    }
+    // Append every selected expense as a linked payment (stays in Monthly).
+    const payments = Array.isArray(plan!.payments) ? plan!.payments.slice() : [];
+    for (const exp of assignExps) {
+      payments.push({
+        name: exp.name,
+        amount: exp.amount,
+        expenseId: exp.id,
+        category: exp.category,
+        paymentMethod: exp.paymentMethod,
+        linked: true,
+        paidAt: toJsDate(exp.createdAt) || new Date(),
+      } as any);
+    }
+    const newPaid = (Number(plan!.paid) || 0) + assignTotal;
+    const planned = Number(plan!.planned) || 0;
+    const over = newPaid > planned; // don't mark done when it overflows the plan
+    const done = !over && newPaid >= planned;
+    await updatePlan(user.uid, id, plan!.id, {
+      payments,
+      paid: newPaid,
+      status: done ? "done" : "partial",
+      actual: done ? newPaid : null,
+    } as any);
+    console.log("[Month] assigned to plan", { plan: plan!.name, count: assignExps.length, newPaid });
+    setAssignExps([]);
+    toast(`${assignExps.length > 1 ? assignExps.length + " entries" : "Assigned"} → "${plan!.name}"`, "success");
   };
 
   const onEditBalance = async () => {
@@ -461,7 +576,7 @@ export default function MonthScreen({ route, navigation }: any) {
           : await exportExcel(source, weekFilter, ctx);
       if (saved) {
         console.log("[Export] downloaded", fmt);
-        toast(`${fmt.toUpperCase()} downloaded ✓ Saved to your folder`, "success");
+        setDownloadDone(fmt); // play the download animation
       }
     } catch (e: any) {
       console.warn("[Export] failed", e?.message);
@@ -910,6 +1025,7 @@ export default function MonthScreen({ route, navigation }: any) {
           </Text>
           <View style={styles.selectActions}>
             <BarBtn label="Calc" color={colors.primary} onPress={calcFromSelection} />
+            {type === "month" && <BarBtn label="Plan" color={colors.primary} onPress={assignSelection} />}
             <BarBtn label="Save" color={colors.primary} onPress={saveSelection} />
             <BarBtn label="Delete" color={colors.danger} onPress={deleteSelection} />
             <BarBtn label="✕" color={colors.textMuted} onPress={exitSelect} />
@@ -940,7 +1056,148 @@ export default function MonthScreen({ route, navigation }: any) {
         initialExpr={calc?.expr}
         onClose={() => setCalc(null)}
       />
-      <DetailsModal exp={details} type={type} colors={colors} onClose={() => setDetails(null)} />
+      <DetailsModal
+        exp={details}
+        type={type}
+        colors={colors}
+        onClose={() => setDetails(null)}
+        onAssign={
+          type === "month" && details && !linkedExpenseIds.has(details.id)
+            ? (exp: Expense) => openAssign([exp])
+            : undefined
+        }
+      />
+
+      {/* Assign expense(s) to a plan */}
+      <Modal visible={assignExps.length > 0} transparent animationType="fade" onRequestClose={() => setAssignExps([])}>
+        <Pressable style={styles.detailsBackdrop} onPress={() => setAssignExps([])}>
+          <Pressable style={[styles.detailsCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18, marginBottom: 4 }}>
+              Assign to a plan
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 12 }}>
+              {assignExps.length === 1
+                ? `"${assignExps[0].name}" · ${formatMoney(assignTotal)}`
+                : `${assignExps.length} entries · ${formatMoney(assignTotal)}`}{" "}
+              — stays in Monthly, also tracked under the plan.
+            </Text>
+
+            {assignPlans.length === 0 && !assignShowNew && (
+              <Text style={{ color: colors.textMuted, fontSize: 13, paddingVertical: 4 }}>
+                No plans in this month yet — create one below.
+              </Text>
+            )}
+            <ScrollView style={{ maxHeight: 200 }}>
+              {assignPlans.map((pl) => {
+                const sel = assignPlanId === pl.id;
+                const planned = Number(pl.planned) || 0;
+                const paidNow = Number(pl.paid) || 0;
+                const after = paidNow + assignTotal;
+                const alreadyOver = paidNow > planned; // over even before this add
+                const over = after > planned;
+                return (
+                  <Pressable
+                    key={pl.id}
+                    onPress={() => {
+                      setAssignPlanId(sel ? null : pl.id);
+                      setAssignShowNew(false);
+                    }}
+                    style={{
+                      paddingVertical: 9,
+                      paddingHorizontal: 10,
+                      borderRadius: 10,
+                      marginBottom: 6,
+                      backgroundColor: sel ? colors.chipBg : "transparent",
+                      borderWidth: 1,
+                      borderColor: sel ? colors.primary : colors.border,
+                    }}
+                  >
+                    <View style={styles.between}>
+                      <Text
+                        style={{ color: sel ? colors.primary : colors.text, fontWeight: "700", flexShrink: 1 }}
+                        numberOfLines={1}
+                      >
+                        {sel ? "● " : "○ "}
+                        {pl.name}
+                      </Text>
+                      <Text
+                        style={{
+                          color: alreadyOver ? colors.danger : colors.textMuted,
+                          fontWeight: "700",
+                          fontSize: 12,
+                        }}
+                      >
+                        {formatMoney(paidNow)} / {formatMoney(planned)}
+                        {alreadyOver ? " ⚠" : ""}
+                      </Text>
+                    </View>
+                    {sel && (
+                      <Text
+                        style={{
+                          color: over ? colors.danger : colors.success,
+                          fontSize: 12,
+                          fontWeight: "700",
+                          marginTop: 6,
+                        }}
+                      >
+                        {alreadyOver
+                          ? `⚠️ This plan is already ${formatMoney(paidNow - planned)} over its ${formatMoney(planned)} plan. Increase the planned amount or remove an existing item first.`
+                          : over
+                          ? `⚠️ This puts the plan ${formatMoney(after - planned)} over its ${formatMoney(planned)} plan. Increase the planned amount or drop an item.`
+                          : `After: ${formatMoney(after)} of ${formatMoney(planned)} · ${formatMoney(planned - after)} left`}
+                      </Text>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+
+            {assignShowNew ? (
+              <TextInput
+                style={{
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.inputBg,
+                  color: colors.text,
+                  borderRadius: 12,
+                  paddingHorizontal: 14,
+                  paddingVertical: 12,
+                  fontSize: 16,
+                  marginTop: 4,
+                }}
+                value={assignNewName}
+                onChangeText={setAssignNewName}
+                placeholder={`New plan name (default "${assignExps[0]?.name || ""}")`}
+                placeholderTextColor={colors.textMuted}
+              />
+            ) : (
+              <Pressable
+                onPress={() => {
+                  setAssignShowNew(true);
+                  setAssignPlanId(null);
+                }}
+                style={{ paddingVertical: 8 }}
+              >
+                <Text style={{ color: colors.primary, fontWeight: "700" }}>+ New plan</Text>
+              </Pressable>
+            )}
+
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+              <Button
+                title="Cancel"
+                variant="secondary"
+                onPress={() => setAssignExps([])}
+                style={{ flex: 1 }}
+              />
+              <Button
+                title={assignPlanId ? "Assign" : "Create & assign"}
+                onPress={doAssign}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Week picker before export */}
       <Modal visible={!!exportFmt} transparent animationType="fade" onRequestClose={() => setExportFmt(null)}>
@@ -993,6 +1250,13 @@ export default function MonthScreen({ route, navigation }: any) {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Download-complete animation */}
+      <DownloadAnimation
+        visible={!!downloadDone}
+        label={(downloadDone || "").toUpperCase()}
+        onDone={() => setDownloadDone(null)}
+      />
     </View>
   );
 }
@@ -1083,7 +1347,7 @@ function ExpenseRow({
   );
 }
 
-function DetailsModal({ exp, type, colors, onClose }: any) {
+function DetailsModal({ exp, type, colors, onClose, onAssign }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
   const { label: pmLabel, emoji: pmEmoji } = usePaymentMethods();
   if (!exp) return null;
@@ -1117,6 +1381,20 @@ function DetailsModal({ exp, type, colors, onClose }: any) {
             </Text>
           </View>
         ))}
+        {onAssign && exp.type === "minus" && (
+          <Pressable
+            onPress={() => onAssign(exp)}
+            style={{
+              marginTop: 16,
+              backgroundColor: colors.primary,
+              borderRadius: 12,
+              paddingVertical: 11,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ color: "#fff", fontWeight: "800" }}>Assign to a plan</Text>
+          </Pressable>
+        )}
         <Pressable onPress={onClose} style={{ marginTop: 14, alignSelf: "center" }}>
           <Text style={{ color: colors.primary, fontWeight: "700" }}>Close</Text>
         </Pressable>
@@ -1166,7 +1444,7 @@ const styles = StyleSheet.create({
   searchRow: { marginBottom: 10 },
   search: { borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15 },
   filterRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
-  filterLabel: { fontSize: 12, fontWeight: "700", marginBottom: 6, marginLeft: 2 },
+  filterLabel: { fontSize: 12, fontWeight: "700", marginTop: 10, marginBottom: 6, marginLeft: 2 },
   footerTotal: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1189,7 +1467,7 @@ const styles = StyleSheet.create({
   },
   catFilterRow: { flexDirection: "row", gap: 8, marginBottom: 12, paddingRight: 4 },
   filterChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 18 },
-  exportRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 },
+  exportRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, marginBottom: 12 },
   exportBtn: {
     flexDirection: "row",
     alignItems: "center",

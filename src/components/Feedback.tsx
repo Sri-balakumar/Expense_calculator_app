@@ -18,6 +18,7 @@ import {
   View,
 } from "react-native";
 import { useTheme } from "../theme/ThemeContext";
+import { currencySymbol } from "../util/money";
 
 type ToastType = "info" | "success" | "error";
 
@@ -188,18 +189,38 @@ export function FeedbackProvider({ children }: { children: React.ReactNode }) {
             <Text style={[styles.title, { color: colors.text }]}>
               {promptState?.title || "Enter value"}
             </Text>
-            <TextInput
-              style={[
-                styles.input,
-                { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg },
-              ]}
-              placeholder={promptState?.placeholder}
-              placeholderTextColor={colors.textMuted}
-              value={promptValue}
-              onChangeText={setPromptValue}
-              keyboardType={promptState?.keyboardType || "default"}
-              autoFocus
-            />
+            <View style={{ justifyContent: "center" }}>
+              <TextInput
+                style={[
+                  styles.input,
+                  {
+                    color: colors.text,
+                    borderColor: colors.border,
+                    backgroundColor: colors.inputBg,
+                    paddingLeft: promptState?.keyboardType === "numeric" ? 32 : 14,
+                  },
+                ]}
+                placeholder={promptState?.placeholder}
+                placeholderTextColor={colors.textMuted}
+                value={promptValue}
+                onChangeText={setPromptValue}
+                keyboardType={promptState?.keyboardType || "default"}
+                autoFocus
+              />
+              {promptState?.keyboardType === "numeric" && (
+                <Text
+                  style={{
+                    position: "absolute",
+                    left: 14,
+                    color: colors.textMuted,
+                    fontSize: 16,
+                    fontWeight: "700",
+                  }}
+                >
+                  {currencySymbol()}
+                </Text>
+              )}
+            </View>
             <View style={styles.actions}>
               <Pressable
                 style={[styles.btn, { backgroundColor: colors.chipBg }]}
@@ -237,7 +258,7 @@ export const useFeedback = () => useContext(FeedbackContext);
 const styles = StyleSheet.create({
   toastWrap: {
     position: "absolute",
-    top: 60,
+    bottom: 90,
     left: 0,
     right: 0,
     alignItems: "center",

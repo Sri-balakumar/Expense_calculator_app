@@ -18,7 +18,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { usePaymentMethods, useQuickAddPayment } from "../context/PaymentMethodsContext";
 import SelectField from "./SelectField";
-import { Button } from "./UI";
+import { Button, MoneyInput } from "./UI";
 import { DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
 import { amountToWords } from "../util/money";
@@ -120,13 +120,11 @@ export default function PlanPayModal({
               )}
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Amount (₹)</Text>
-              <TextInput
+              <MoneyInput
                 style={inputStyle}
                 value={amount}
                 onChangeText={setAmount}
-                keyboardType="numeric"
                 placeholder="0"
-                placeholderTextColor={colors.textMuted}
                 autoFocus
               />
               {Number(amount) > 0 && (

@@ -88,6 +88,7 @@ export default function SignupScreen({ navigation }: any) {
             />
             <Field
               label="Monthly salary (₹)"
+              money
               value={salary}
               onChangeText={setSalary}
               placeholder="e.g. 50000"

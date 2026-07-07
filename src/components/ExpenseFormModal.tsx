@@ -18,7 +18,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { usePaymentMethods, useQuickAddPayment } from "../context/PaymentMethodsContext";
 import SelectField from "./SelectField";
-import { Button } from "./UI";
+import { Button, MoneyInput } from "./UI";
 import { DEFAULT_CATEGORY, DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
 import { amountToWords } from "../util/money";
@@ -157,13 +157,11 @@ export default function ExpenseFormModal({
               />
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Amount (₹)</Text>
-              <TextInput
+              <MoneyInput
                 style={inputStyle}
                 value={amount}
                 onChangeText={setAmount}
                 placeholder="e.g. 500"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="numeric"
               />
               {Number(amount) > 0 && (
                 <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>

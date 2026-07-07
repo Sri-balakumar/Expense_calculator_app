@@ -10,6 +10,7 @@ import * as XLSX from "xlsx";
 import { Expense } from "../types";
 import { CATEGORY_LABELS, PAYMENT_LABELS } from "../constants/categories";
 import { toJsDate, weekOfMonth, formatDateMedium } from "./date";
+import { currencySymbol } from "./money";
 
 interface ExportContext {
   monthName: string;
@@ -169,19 +170,20 @@ export async function exportExcel(
   const data = buildExportRows(expenses, weekFilter, ctx);
   const title = (ctx.isBudget ? "Budget Report — " : "Expense Report — ") + ctx.monthName;
 
+  const cur = currencySymbol().trim(); // symbol for column headers
   const summary: [string, any][] = [["Name", ctx.userName || "-"]];
-  if (ctx.isBudget) summary.push(["Budget Amount (₹)", ctx.limit]);
+  if (ctx.isBudget) summary.push([`Budget Amount (${cur})`, ctx.limit]);
   else {
-    summary.push(["Salary (₹)", ctx.limit]);
-    summary.push(["Current Balance (₹)", ctx.currentBalance]);
+    summary.push([`Salary (${cur})`, ctx.limit]);
+    summary.push([`Current Balance (${cur})`, ctx.currentBalance]);
   }
-  summary.push(["Total Spend (₹)", data.totalSpent]);
-  summary.push(["Total Income (₹)", data.totalIncome]);
-  summary.push([ctx.isBudget ? "Remaining (₹)" : "Total Remaining (₹)", data.remaining]);
+  summary.push([`Total Spend (${cur})`, data.totalSpent]);
+  summary.push([`Total Income (${cur})`, data.totalIncome]);
+  summary.push([ctx.isBudget ? `Remaining (${cur})` : `Total Remaining (${cur})`, data.remaining]);
 
   const colHeader = ctx.isBudget
-    ? ["#", "Date", "Name", "Category", "Type", "Payment", "Notes", "Amount (₹)"]
-    : ["#", "Date", "Week", "Name", "Category", "Type", "Payment", "Notes", "Amount (₹)"];
+    ? ["#", "Date", "Name", "Category", "Type", "Payment", "Notes", `Amount (${cur})`]
+    : ["#", "Date", "Week", "Name", "Category", "Type", "Payment", "Notes", `Amount (${cur})`];
 
   const bodyRows = data.rows.map((r, i) =>
     ctx.isBudget

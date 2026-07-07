@@ -11,7 +11,7 @@ import {
 import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
-import { Card, Button } from "../components/UI";
+import { Card, Button, MoneyInput } from "../components/UI";
 import SelectField from "../components/SelectField";
 import PlanPayModal, { PlanPayResult } from "../components/PlanPayModal";
 import {
@@ -21,13 +21,14 @@ import {
   addPlan,
   updatePlan,
   deletePlan,
+  getPlan,
   addExpense,
   deleteExpense,
   listMonths,
   movePlans,
 } from "../firebase/firestore";
 import DateTimePicker from "@react-native-community/datetimepicker";
-import { formatMoney, amountToWords } from "../util/money";
+import { formatMoney, amountToWords, currencySymbol } from "../util/money";
 import {
   toJsDate,
   formatDateTime,
@@ -57,6 +58,7 @@ export default function PlanScreen({ route }: any) {
   const [plans, setPlans] = useState<PlanDoc[]>([]);
 
   // add-row state
+  const [addOpen, setAddOpen] = useState(false); // collapsible "Add a plan" form
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("other");
@@ -115,6 +117,12 @@ export default function PlanScreen({ route }: any) {
   const afterPlans = remaining - pending;
   const mainBalance = Number(profile?.mainBalance) || 0;
 
+  // Live preview while typing a new plan's amount: current amount + existing
+  // pending plans, and how it leaves the balance.
+  const addAmt = Number(amount) || 0;
+  const liveTotal = pending + addAmt; // pending plans + the one being typed
+  const liveAfter = remaining - liveTotal;
+
   // ---- add ----
   const onAdd = async () => {
     if (!user) return;
@@ -147,6 +155,7 @@ export default function PlanScreen({ route }: any) {
     setAmount("");
     setCategory("other");
     setPlanDate(todayStr());
+    setAddOpen(false); // collapse the dropdown after adding
   };
 
   // ---- done / part-pay ----
@@ -250,6 +259,52 @@ export default function PlanScreen({ route }: any) {
     toast("Plan reopened.", "success");
   };
 
+  // Undo a move: delete the copy in the target month and restore this plan.
+  // If the copy has already been used (part-paid) there, warn first.
+  const onUndoMove = async (p: PlanDoc) => {
+    if (!user) return;
+    const copy =
+      p.movedToMonthId && p.movedToPlanId
+        ? await getPlan(user.uid, p.movedToMonthId, p.movedToPlanId).catch(() => null)
+        : null;
+    const copyPaid = Number(copy?.paid) || 0;
+    const copyPayCount = Array.isArray(copy?.payments) ? (copy!.payments as any[]).length : 0;
+    const used = !!copy && (copyPaid > 0 || copyPayCount > 0);
+
+    const ok = await confirm({
+      title: `Undo move of "${p.name}"?`,
+      message: used
+        ? `⚠️ It's already been used in ${p.movedTo} — ${formatMoney(copyPaid)} paid across ${copyPayCount} payment${copyPayCount !== 1 ? "s" : ""}. Undoing will delete that copy and remove those recorded expenses. Continue?`
+        : `Brings it back to ${monthName}${p.movedTo ? ` and removes the copy in ${p.movedTo}` : ""}.`,
+      confirmText: "Undo move",
+    });
+    if (!ok) return;
+
+    // Clean up the copy's recorded expenses in the target month, then delete it.
+    if (copy && p.movedToMonthId) {
+      const payments = Array.isArray(copy.payments) ? copy.payments : [];
+      for (const pay of payments) {
+        if (pay.expenseId)
+          await deleteExpense(user.uid, "month", p.movedToMonthId, pay.expenseId).catch(() => {});
+      }
+      if (copy.pushedExpenseId)
+        await deleteExpense(user.uid, "month", p.movedToMonthId, copy.pushedExpenseId).catch(() => {});
+    }
+    if (p.movedToMonthId && p.movedToPlanId) {
+      await deletePlan(user.uid, p.movedToMonthId, p.movedToPlanId).catch(() => {});
+    }
+    const paid = Number(p.paid) || 0;
+    await updatePlan(user.uid, monthId, p.id, {
+      status: paid > 0 ? "partial" : "pending",
+      actual: null,
+      movedTo: null,
+      movedToMonthId: null,
+      movedToPlanId: null,
+    } as any);
+    console.log("[Plan] move undone", { name: p.name, used });
+    toast("Move undone.", "success");
+  };
+
   const onDelete = async (p: PlanDoc) => {
     if (!user) return;
     const payments = Array.isArray(p.payments) ? p.payments : [];
@@ -265,6 +320,22 @@ export default function PlanScreen({ route }: any) {
     if (p.pushedExpenseId) await deleteExpense(user.uid, "month", monthId, p.pushedExpenseId).catch(() => {});
     await deletePlan(user.uid, monthId, p.id);
     toast("Plan deleted.", "success");
+  };
+
+  // Remove one added item from a plan (unlink it). The linked expense stays in
+  // Monthly; only its association with this plan (and the paid total) is removed.
+  const removePayment = async (plan: PlanDoc, idx: number) => {
+    if (!user) return;
+    const payments = Array.isArray(plan.payments) ? plan.payments.slice() : [];
+    const removed = payments.splice(idx, 1)[0];
+    if (!removed) return;
+    const newPaid = Math.max(0, (Number(plan.paid) || 0) - (Number(removed.amount) || 0));
+    const status = payments.length === 0 && newPaid <= 0 ? "pending" : "partial";
+    await updatePlan(user.uid, monthId, plan.id, { payments, paid: newPaid, status, actual: null });
+    console.log("[Plan] removed item from plan", { plan: plan.name, item: removed.name, newPaid });
+    // Keep the open detail modal in sync so the over-warning updates live.
+    setDetail({ ...plan, payments, paid: newPaid, status } as PlanDoc);
+    toast(`Removed "${removed.name || "item"}"`, "success");
   };
 
   // ---- edit ----
@@ -325,9 +396,22 @@ export default function PlanScreen({ route }: any) {
           )}
         </Card>
 
-        {/* Add row */}
+        {/* Add row (collapsible) */}
         <Card>
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Add a plan</Text>
+          <Pressable
+            onPress={() => {
+              setAddOpen((o) => !o);
+              console.log("[Plan] add form toggled", !addOpen);
+            }}
+            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
+          >
+            <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 0 }]}>Add a plan</Text>
+            <Text style={{ color: colors.primary, fontSize: 16, fontWeight: "800" }}>
+              {addOpen ? "▲" : "▼"}
+            </Text>
+          </Pressable>
+          {addOpen && (
+          <View style={{ marginTop: 12 }}>
           <TextInput
             style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg }]}
             placeholder="Name (e.g. Grocery)"
@@ -335,18 +419,54 @@ export default function PlanScreen({ route }: any) {
             value={name}
             onChangeText={setName}
           />
-          <TextInput
+          <MoneyInput
             style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8 }]}
             placeholder="Planned amount (₹)"
-            placeholderTextColor={colors.textMuted}
-            keyboardType="numeric"
             value={amount}
-            onChangeText={setAmount}
+            onChangeText={(t) => {
+              setAmount(t);
+              const a = Number(t) || 0;
+              console.log("[Plan] live total", { typed: a, pending, newTotal: pending + a, afterPlans: remaining - (pending + a) });
+            }}
           />
           {Number(amount) > 0 && (
             <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
               {amountToWords(amount)}
             </Text>
+          )}
+          {addAmt > 0 && (
+            <View style={[styles.liveBox, { backgroundColor: colors.chipBg }]}>
+              <View style={styles.liveRow}>
+                <Text style={{ color: colors.textMuted, fontSize: 13 }}>Pending plans</Text>
+                <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                  {formatMoney(pending)}
+                </Text>
+              </View>
+              <View style={styles.liveRow}>
+                <Text style={{ color: colors.textMuted, fontSize: 13 }}>+ This plan</Text>
+                <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                  {formatMoney(addAmt)}
+                </Text>
+              </View>
+              <View style={[styles.liveRow, styles.liveTotalRow, { borderTopColor: colors.border }]}>
+                <Text style={{ color: colors.text, fontSize: 14, fontWeight: "800" }}>New plans total</Text>
+                <Text style={{ color: colors.primary, fontSize: 15, fontWeight: "800" }}>
+                  {formatMoney(liveTotal)}
+                </Text>
+              </View>
+              <View style={styles.liveRow}>
+                <Text style={{ color: colors.textMuted, fontSize: 13 }}>After plans</Text>
+                <Text
+                  style={{
+                    color: liveAfter < 0 ? colors.danger : colors.success,
+                    fontSize: 13,
+                    fontWeight: "700",
+                  }}
+                >
+                  {formatMoney(liveAfter)}
+                </Text>
+              </View>
+            </View>
           )}
           <View style={{ marginTop: 8 }}>
             <SelectField
@@ -381,6 +501,8 @@ export default function PlanScreen({ route }: any) {
             />
           )}
           <Button title="+ Add plan" onPress={onAdd} style={{ marginTop: 10 }} />
+          </View>
+          )}
         </Card>
 
         {/* Rows */}
@@ -401,6 +523,7 @@ export default function PlanScreen({ route }: any) {
               onEdit={() => openEdit(p)}
               onDelete={() => onDelete(p)}
               onUndo={() => onUndo(p)}
+              onUndoMove={() => onUndoMove(p)}
             />
           ))
         )}
@@ -441,14 +564,29 @@ export default function PlanScreen({ route }: any) {
               placeholder="Name"
               placeholderTextColor={colors.textMuted}
             />
-            <TextInput
-              style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8 }]}
-              value={editAmount}
-              onChangeText={setEditAmount}
-              keyboardType="numeric"
-              placeholder="Planned amount"
-              placeholderTextColor={colors.textMuted}
-            />
+            <View
+              style={[
+                styles.input,
+                {
+                  borderColor: colors.border,
+                  backgroundColor: colors.inputBg,
+                  marginTop: 8,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  paddingVertical: 0,
+                },
+              ]}
+            >
+              <Text style={{ color: colors.textMuted, fontSize: 16, fontWeight: "700", marginRight: 6 }}>{currencySymbol()}</Text>
+              <TextInput
+                style={{ flex: 1, color: colors.text, fontSize: 16, paddingVertical: 12 }}
+                value={editAmount}
+                onChangeText={setEditAmount}
+                keyboardType="numeric"
+                placeholder="Planned amount"
+                placeholderTextColor={colors.textMuted}
+              />
+            </View>
             <View style={{ marginTop: 8 }}>
               <SelectField
                 title="Category"
@@ -504,7 +642,14 @@ export default function PlanScreen({ route }: any) {
       <Modal visible={!!detail} transparent animationType="fade" onRequestClose={() => setDetail(null)}>
         <Pressable style={styles.backdrop} onPress={() => setDetail(null)}>
           <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
-            {detail && <PlanDetail p={detail} colors={colors} expenseById={expenseById} />}
+            {detail && (
+              <PlanDetail
+                p={detail}
+                colors={colors}
+                expenseById={expenseById}
+                onRemove={(idx: number) => removePayment(detail, idx)}
+              />
+            )}
             <Button title="Close" variant="secondary" onPress={() => setDetail(null)} style={{ marginTop: 12 }} />
           </Pressable>
         </Pressable>
@@ -532,7 +677,7 @@ function statusChip(p: PlanDoc, colors: any) {
   return map[p.status] || map.pending;
 }
 
-function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete, onUndo }: any) {
+function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete, onUndo, onUndoMove }: any) {
   const { emoji: catEmoji } = useCategories();
   const planned = Number(p.planned) || 0;
   const paid = Number(p.paid) || 0;
@@ -543,6 +688,10 @@ function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete
   const isMoved = p.status === "moved";
   const isPartial = p.status === "partial";
 
+  // Over-budget: what's been added to the plan exceeds its planned amount.
+  const over = !isMoved && paid > planned;
+  const overBy = paid - planned;
+
   let amountText: string;
   if (isDone) amountText = `${formatMoney(planned)} → ${formatMoney(actual || paid)}`;
   else if (isPartial) amountText = `${formatMoney(paid)} paid · ${formatMoney(Math.max(0, planned - paid))} left`;
@@ -550,17 +699,28 @@ function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete
   else amountText = formatMoney(planned);
 
   return (
-    <Card>
+    <Card style={over ? { borderWidth: 1.5, borderColor: colors.danger } : undefined}>
       <Pressable onPress={onDetail}>
         <View style={styles.rowTop}>
-          <Text style={{ color: colors.text, fontWeight: "700", fontSize: 16, flexShrink: 1 }}>
+          <Text
+            style={{ color: over ? colors.danger : colors.text, fontWeight: "700", fontSize: 16, flexShrink: 1 }}
+          >
             {catEmoji(cat)} {p.name}
           </Text>
-          <View style={[styles.chip, { backgroundColor: chip.bg }]}>
-            <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>{chip.label}</Text>
+          <View style={[styles.chip, { backgroundColor: over ? colors.danger : chip.bg }]}>
+            <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>
+              {over ? "⚠ Over" : chip.label}
+            </Text>
           </View>
         </View>
-        <Text style={{ color: colors.textMuted, marginTop: 4 }}>{amountText}</Text>
+        <Text style={{ color: over ? colors.danger : colors.textMuted, marginTop: 4, fontWeight: over ? "700" : "400" }}>
+          {over ? `${formatMoney(paid)} added · ${formatMoney(overBy)} over the ${formatMoney(planned)} plan` : amountText}
+        </Text>
+        {over && (
+          <Text style={{ color: colors.danger, fontSize: 11, marginTop: 3 }}>
+            Tap to see which item caused this.
+          </Text>
+        )}
         {!!(p as any).date && (
           <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 2 }}>
             📅 {formatDateMedium(toJsDate((p as any).date))}
@@ -576,6 +736,7 @@ function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete
         {!isMoved && !isDone && <MiniBtn label="Part" color={colors.text} onPress={onPart} />}
         {!isMoved && !isDone && <MiniBtn label="Move" color={colors.text} onPress={onMove} />}
         {isDone && <MiniBtn label="Undo" color={colors.text} onPress={onUndo} />}
+        {isMoved && <MiniBtn label="Undo move" color={colors.primary} onPress={onUndoMove} />}
         {!isMoved && <MiniBtn label="Edit" color={colors.text} onPress={onEdit} />}
         <MiniBtn label="Delete" color={colors.danger} onPress={onDelete} />
       </View>
@@ -591,20 +752,46 @@ function MiniBtn({ label, color, onPress }: { label: string; color: string; onPr
   );
 }
 
-function PlanDetail({ p, colors, expenseById }: any) {
+function PlanDetail({ p, colors, expenseById, onRemove }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
   const planned = Number(p.planned) || 0;
   const paid = Number(p.paid) || 0;
   const actual = Number(p.actual) || 0;
   const isDone = p.status === "done";
   const payments = Array.isArray(p.payments) ? p.payments : [];
+  // Over-budget: figure out which added item(s) pushed the plan over its plan.
+  const over = p.status !== "moved" && paid > planned;
+  const overBy = paid - planned;
+  const culprits = payments.filter((pp: any) => Number(pp.amount) > planned);
+  const culpritList = culprits.length ? culprits : payments;
+  const culpritNames = culpritList.map((pp: any) => pp.name || p.name).join(", ");
   return (
     <View>
       <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18 }}>{p.name}</Text>
       <Text style={{ color: colors.textMuted, marginTop: 2, marginBottom: 10 }}>
         {catEmoji(p.category)} {catLabel(p.category)} ·{" "}
-        {statusChip(p, colors).label}
+        {over ? "⚠ Over the plan" : statusChip(p, colors).label}
       </Text>
+      {over && (
+        <View
+          style={{
+            backgroundColor: "rgba(239,68,68,0.12)",
+            borderWidth: 1,
+            borderColor: colors.danger,
+            borderRadius: 10,
+            padding: 10,
+            marginBottom: 10,
+          }}
+        >
+          <Text style={{ color: colors.danger, fontWeight: "800", marginBottom: 3 }}>
+            ⚠️ Over by {formatMoney(overBy)}
+          </Text>
+          <Text style={{ color: colors.danger, fontSize: 13 }}>
+            This is because of {culpritNames}. Remove {culprits.length === 1 ? "it" : "one of them"} from
+            this plan, or increase the planned amount above {formatMoney(paid)}.
+          </Text>
+        </View>
+      )}
       <DRow label="Planned" value={formatMoney(planned)} colors={colors} />
       {isDone ? (
         <DRow label="Spent" value={formatMoney(payments.length ? paid : actual)} colors={colors} />
@@ -622,15 +809,27 @@ function PlanDetail({ p, colors, expenseById }: any) {
           {payments.map((pay: any, i: number) => {
             const exp = pay.expenseId ? expenseById[pay.expenseId] : null;
             const nm = pay.name || (exp && exp.name) || p.name;
+            // Highlight the item(s) that pushed the plan over its plan.
+            const isCulprit = over && Number(pay.amount) > planned;
             return (
-              <View key={i} style={styles.rowTop}>
-                <Text style={{ color: colors.textMuted, flexShrink: 1 }}>
+              <View key={i} style={[styles.rowTop, { alignItems: "center" }]}>
+                <Text style={{ color: isCulprit ? colors.danger : colors.textMuted, flexShrink: 1 }}>
+                  {isCulprit ? "⚠️ " : ""}
                   {nm}{" "}
                   <Text style={{ fontSize: 11 }}>
                     {pay.paidAt ? `· ${formatDateTime(toJsDate(pay.paidAt))}` : ""}
                   </Text>
                 </Text>
-                <Text style={{ color: colors.text, fontWeight: "600" }}>{formatMoney(pay.amount)}</Text>
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <Text style={{ color: isCulprit ? colors.danger : colors.text, fontWeight: "600" }}>
+                    {formatMoney(pay.amount)}
+                  </Text>
+                  {onRemove && (
+                    <Pressable onPress={() => onRemove(i)} hitSlop={8} style={{ marginLeft: 10 }}>
+                      <Text style={{ color: colors.danger, fontWeight: "700" }}>Remove</Text>
+                    </Pressable>
+                  )}
+                </View>
               </View>
             );
           })}
@@ -673,4 +872,7 @@ const styles = StyleSheet.create({
   modalCard: { width: "100%", maxWidth: 420, borderRadius: 20, padding: 20, maxHeight: "85%" },
   actions: { flexDirection: "row", gap: 10, marginTop: 16 },
   monthOpt: { padding: 12, borderRadius: 10, marginBottom: 8 },
+  liveBox: { marginTop: 10, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  liveRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 3 },
+  liveTotalRow: { borderTopWidth: 1, marginTop: 4, paddingTop: 7 },
 });

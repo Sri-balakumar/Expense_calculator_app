@@ -15,6 +15,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { fetchMonthsData, createMonth } from "../firebase/firestore";
 import { formatMoney } from "../util/money";
+import { MoneyInput } from "./UI";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -158,14 +159,12 @@ export default function MonthPickerModal({
                 </Text>
               </Pressable>
             )}
-            <TextInput
+            <MoneyInput
               style={[
                 styles.input,
                 { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg },
               ]}
               placeholder="e.g. 5000"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="numeric"
               value={balance}
               onChangeText={setBalance}
               autoFocus

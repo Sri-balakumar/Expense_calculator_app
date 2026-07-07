@@ -41,6 +41,23 @@ export interface BudgetDoc {
   createdAt?: any;
 }
 
+// Savings goal: a pot you add savings into ("in") and plan purchases from ("out").
+export interface GoalEntry {
+  eid: string;
+  name?: string;
+  amount: number;
+  type: "in" | "out"; // in = savings added, out = purchase planned/spent
+  at?: any;
+}
+
+export interface GoalDoc {
+  id: string;
+  name: string;
+  target?: number; // optional goal amount
+  entries?: GoalEntry[];
+  createdAt?: any;
+}
+
 export type PlanStatus = "pending" | "partial" | "done" | "moved";
 
 export interface PlanPayment {
@@ -66,6 +83,9 @@ export interface PlanDoc {
   pushedExpenseId?: string | null;
   transferredFrom?: string;
   movedTo?: string;
+  // Where a moved plan went — used to undo the move (delete the copy + restore).
+  movedToMonthId?: string | null;
+  movedToPlanId?: string | null;
   createdAt?: any;
 }
 

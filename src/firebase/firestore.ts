@@ -29,6 +29,8 @@ import {
   PlanDoc,
   RecurringDoc,
   UserDoc,
+  GoalDoc,
+  GoalEntry,
 } from "../types";
 
 // ---- path helpers -----------------------------------------------------------
@@ -264,6 +266,16 @@ export function watchExpenses(
   );
 }
 
+// One-shot read of a tracker's expenses (used for balance projections).
+export async function getExpenses(
+  uid: string,
+  type: TrackerType,
+  id: string
+): Promise<Expense[]> {
+  const snap = await getDocs(expensesColFor(uid, type, id));
+  return docsToExpenses(snap);
+}
+
 export async function addExpense(
   uid: string,
   type: TrackerType,
@@ -379,6 +391,89 @@ export async function createBudget(
   return ref.id;
 }
 
+// ---- savings goals (users/{uid}/goals/{id}) ---------------------------------
+const goalsCol = (uid: string) => collection(db, "users", uid, "goals");
+
+export function watchGoals(
+  uid: string,
+  cb: (goals: GoalDoc[]) => void,
+  onError?: (e: any) => void
+): () => void {
+  return onSnapshot(
+    query(goalsCol(uid), orderBy("createdAt", "desc")),
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))),
+    onError
+  );
+}
+
+export async function getGoal(uid: string, id: string): Promise<GoalDoc | null> {
+  const snap = await getDoc(doc(goalsCol(uid), id));
+  return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) } as GoalDoc) : null;
+}
+
+export async function createGoal(
+  uid: string,
+  name: string,
+  initialSavings?: number
+): Promise<string> {
+  const amt = Number(initialSavings) || 0;
+  // Seed the pot with the amount the user already has to save.
+  const entries: GoalEntry[] =
+    amt > 0
+      ? [
+          {
+            eid: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+            name: "Initial savings",
+            amount: amt,
+            type: "in",
+            at: new Date(),
+          },
+        ]
+      : [];
+  const ref = await addDoc(goalsCol(uid), {
+    name,
+    target: 0, // optional goal-to-reach; set later via "Add to target"/Edit
+    entries,
+    createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function addGoalEntry(
+  uid: string,
+  id: string,
+  entry: Omit<GoalEntry, "eid" | "at">
+): Promise<void> {
+  const g = await getGoal(uid, id);
+  if (!g) return;
+  const entries = Array.isArray(g.entries) ? g.entries.slice() : [];
+  entries.push({
+    ...entry,
+    eid: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+    at: new Date(),
+  });
+  await updateDoc(doc(goalsCol(uid), id), { entries } as any);
+}
+
+export async function deleteGoalEntry(uid: string, id: string, eid: string): Promise<void> {
+  const g = await getGoal(uid, id);
+  if (!g) return;
+  const entries = (Array.isArray(g.entries) ? g.entries : []).filter((e) => e.eid !== eid);
+  await updateDoc(doc(goalsCol(uid), id), { entries } as any);
+}
+
+export async function updateGoal(
+  uid: string,
+  id: string,
+  updates: Partial<Pick<GoalDoc, "name" | "target">>
+): Promise<void> {
+  await updateDoc(doc(goalsCol(uid), id), updates as any);
+}
+
+export async function deleteGoal(uid: string, id: string): Promise<void> {
+  await deleteDoc(doc(goalsCol(uid), id));
+}
+
 // ---- plans (month-scoped) ---------------------------------------------------
 export function watchPlans(
   uid: string,
@@ -391,6 +486,11 @@ export function watchPlans(
     (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))),
     onError
   );
+}
+
+export async function getPlans(uid: string, monthId: string): Promise<PlanDoc[]> {
+  const snap = await getDocs(plansCol(uid, monthId));
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PlanDoc[];
 }
 
 export async function addPlan(
@@ -422,6 +522,15 @@ export async function deletePlan(
   await deleteDoc(doc(plansCol(uid, monthId), planId));
 }
 
+export async function getPlan(
+  uid: string,
+  monthId: string,
+  planId: string
+): Promise<PlanDoc | null> {
+  const snap = await getDoc(doc(plansCol(uid, monthId), planId));
+  return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) } as PlanDoc) : null;
+}
+
 // Move plans to another month (port of executeMove). mode "whole" moves the
 // entire plan; "unpaid" moves only the remaining unpaid amount. Source plans are
 // kept and marked status:"moved". Returns the count actually moved.
@@ -443,7 +552,8 @@ export async function movePlans(
     const paid = Number(p.paid) || 0;
     const remaining = Math.max(0, planned - paid);
     if (mode === "whole") {
-      batch.set(doc(target), {
+      const newRef = doc(target);
+      batch.set(newRef, {
         name: p.name,
         planned,
         category: p.category || "other",
@@ -455,11 +565,17 @@ export async function movePlans(
         transferredFrom: fromMonthName,
         createdAt: serverTimestamp(),
       });
-      batch.update(doc(source, p.id), { status: "moved", movedTo: targetName });
+      batch.update(doc(source, p.id), {
+        status: "moved",
+        movedTo: targetName,
+        movedToMonthId: targetId,
+        movedToPlanId: newRef.id,
+      });
       moved++;
     } else {
       if (remaining <= 0) return;
-      batch.set(doc(target), {
+      const newRef = doc(target);
+      batch.set(newRef, {
         name: p.name,
         planned: remaining,
         category: p.category || "other",
@@ -471,7 +587,13 @@ export async function movePlans(
         transferredFrom: fromMonthName,
         createdAt: serverTimestamp(),
       });
-      batch.update(doc(source, p.id), { status: "moved", movedTo: targetName, actual: paid });
+      batch.update(doc(source, p.id), {
+        status: "moved",
+        movedTo: targetName,
+        actual: paid,
+        movedToMonthId: targetId,
+        movedToPlanId: newRef.id,
+      });
       moved++;
     }
   });
@@ -491,6 +613,14 @@ export async function addRecurring(
 ): Promise<string> {
   const ref = await addDoc(recurringCol(uid), rec);
   return ref.id;
+}
+
+export async function updateRecurring(
+  uid: string,
+  id: string,
+  updates: Partial<Omit<RecurringDoc, "id">>
+): Promise<void> {
+  await updateDoc(doc(recurringCol(uid), id), updates as any);
 }
 
 export async function deleteRecurring(uid: string, id: string): Promise<void> {

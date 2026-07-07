@@ -31,12 +31,12 @@ function AnimatedTabIcon({
   colors: any;
 }) {
   const scale = useRef(new Animated.Value(focused ? 1 : 0.9)).current;
-  const hop = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (focused) {
       console.log("[Tabs] selected", routeName);
-      // Clear pop: shrink then spring to full size with overshoot.
+      // Pop / bounce: shrink then spring to full size with overshoot. Stays
+      // inside the pill so it's never clipped by the bar's rounded top.
       scale.setValue(0.6);
       Animated.spring(scale, {
         toValue: 1,
@@ -44,12 +44,6 @@ function AnimatedTabIcon({
         tension: 150,
         useNativeDriver: true,
       }).start();
-      // Hop: jump up quickly, then spring back down with a bounce.
-      hop.setValue(0);
-      Animated.sequence([
-        Animated.timing(hop, { toValue: 1, duration: 130, useNativeDriver: true }),
-        Animated.spring(hop, { toValue: 0, friction: 4, tension: 130, useNativeDriver: true }),
-      ]).start();
     } else {
       Animated.spring(scale, {
         toValue: 0.9,
@@ -58,13 +52,12 @@ function AnimatedTabIcon({
         useNativeDriver: true,
       }).start();
     }
-  }, [focused, routeName, scale, hop]);
+  }, [focused, routeName, scale]);
 
   const base = ICONS[routeName];
   const name = focused
     ? (base.replace("-outline", "") as keyof typeof Ionicons.glyphMap)
     : base;
-  const translateY = hop.interpolate({ inputRange: [0, 1], outputRange: [0, -12] });
 
   return (
     <View style={styles.tabItem}>
@@ -79,7 +72,7 @@ function AnimatedTabIcon({
             shadowOffset: { width: 0, height: 2 },
             elevation: 4,
           },
-          { transform: [{ scale }, { translateY }] },
+          { transform: [{ scale }] },
         ]}
       >
         <Ionicons name={name} size={21} color={focused ? "#fff" : "rgba(255,255,255,0.6)"} />
@@ -134,8 +127,8 @@ export default function TabNavigator() {
       })}
     >
       <Tab.Screen name="Monthly" component={MonthlyScreen} />
-      <Tab.Screen name="Budgets" component={BudgetsScreen} />
       <Tab.Screen name="Plans" component={PlansScreen} />
+      <Tab.Screen name="Budgets" component={BudgetsScreen} />
       <Tab.Screen name="Year" component={YearScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>

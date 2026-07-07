@@ -5,6 +5,7 @@ import { useTheme } from "../theme/ThemeContext";
 import TabNavigator from "./TabNavigator";
 import MonthScreen from "../screens/MonthScreen";
 import PlanScreen from "../screens/PlanScreen";
+import GoalScreen from "../screens/GoalScreen";
 
 const Stack = createNativeStackNavigator();
 
@@ -33,6 +34,7 @@ export default function AppNavigator() {
         options={{ title: "Month" }}
       />
       <Stack.Screen name="Plan" component={PlanScreen} options={{ title: "Plan" }} />
+      <Stack.Screen name="Goal" component={GoalScreen} options={{ title: "Goal" }} />
     </Stack.Navigator>
   );
 }
