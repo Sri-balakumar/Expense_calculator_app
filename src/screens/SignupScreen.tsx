@@ -12,6 +12,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../theme/ThemeContext";
 import { useFeedback } from "../components/Feedback";
 import { Button, Field } from "../components/UI";
+import { currencySymbol } from "../util/money";
 import { signUp, signOutUser, friendlyAuthError } from "../firebase/auth";
 import { createUserDoc } from "../firebase/firestore";
 
@@ -87,7 +88,7 @@ export default function SignupScreen({ navigation }: any) {
               keyboardType="email-address"
             />
             <Field
-              label="Monthly salary (₹)"
+              label={`Monthly salary (${currencySymbol().trim()})`}
               money
               value={salary}
               onChangeText={setSalary}

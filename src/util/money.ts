@@ -6,20 +6,25 @@
 export interface CurrencyDef {
   code: string;
   symbol: string;
+  name: string; // display name, e.g. "Indian Rupee"
   word: string; // spoken name, e.g. "rupees"
   grouping: "indian" | "western";
 }
 
 // Currencies the user can pick from in Profile.
 export const CURRENCIES: CurrencyDef[] = [
-  { code: "INR", symbol: "₹", word: "rupees", grouping: "indian" },
-  { code: "USD", symbol: "$", word: "dollars", grouping: "western" },
-  { code: "EUR", symbol: "€", word: "euros", grouping: "western" },
-  { code: "GBP", symbol: "£", word: "pounds", grouping: "western" },
-  { code: "AED", symbol: "AED ", word: "dirham", grouping: "western" },
-  { code: "JPY", symbol: "¥", word: "yen", grouping: "western" },
-  { code: "AUD", symbol: "A$", word: "dollars", grouping: "western" },
-  { code: "CAD", symbol: "C$", word: "dollars", grouping: "western" },
+  { code: "INR", symbol: "₹", name: "Indian Rupee", word: "rupees", grouping: "indian" },
+  { code: "USD", symbol: "$", name: "US Dollar", word: "dollars", grouping: "western" },
+  { code: "EUR", symbol: "€", name: "Euro", word: "euros", grouping: "western" },
+  { code: "GBP", symbol: "£", name: "British Pound", word: "pounds", grouping: "western" },
+  { code: "AED", symbol: "AED ", name: "UAE Dirham", word: "dirham", grouping: "western" },
+  { code: "JPY", symbol: "¥", name: "Japanese Yen", word: "yen", grouping: "western" },
+  { code: "AUD", symbol: "A$", name: "Australian Dollar", word: "dollars", grouping: "western" },
+  { code: "CAD", symbol: "C$", name: "Canadian Dollar", word: "dollars", grouping: "western" },
+  { code: "SGD", symbol: "S$", name: "Singapore Dollar", word: "dollars", grouping: "western" },
+  { code: "MYR", symbol: "RM", name: "Malaysian Ringgit", word: "ringgit", grouping: "western" },
+  { code: "SAR", symbol: "SAR ", name: "Saudi Riyal", word: "riyals", grouping: "western" },
+  { code: "CNY", symbol: "¥", name: "Chinese Yuan", word: "yuan", grouping: "western" },
 ];
 
 let active: CurrencyDef = CURRENCIES[0];

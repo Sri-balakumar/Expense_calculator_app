@@ -21,7 +21,7 @@ import SelectField from "./SelectField";
 import { Button, MoneyInput } from "./UI";
 import { DEFAULT_CATEGORY, DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
-import { amountToWords } from "../util/money";
+import { amountToWords, currencySymbol } from "../util/money";
 import { Expense, ExpenseType } from "../types";
 
 export interface ExpenseFormResult {
@@ -39,6 +39,7 @@ export default function ExpenseFormModal({
   mode,
   initial,
   initialDate,
+  presetType,
   onClose,
   onSubmit,
   onError,
@@ -47,6 +48,7 @@ export default function ExpenseFormModal({
   mode: "add" | "edit";
   initial?: Expense | null;
   initialDate?: string;
+  presetType?: ExpenseType; // set from the Spend/Income chooser → hides the toggle
   onClose: () => void;
   onSubmit: (r: ExpenseFormResult) => void;
   onError: (msg: string) => void;
@@ -78,7 +80,7 @@ export default function ExpenseFormModal({
       setNotes(initial.notes || "");
       setDate(initialDate || todayStr());
     } else {
-      setType("minus");
+      setType(presetType || "minus");
       setName("");
       setAmount("");
       setCategory(DEFAULT_CATEGORY);
@@ -86,7 +88,7 @@ export default function ExpenseFormModal({
       setNotes("");
       setDate(initialDate || todayStr());
     }
-  }, [visible, mode, initial, initialDate]);
+  }, [visible, mode, initial, initialDate, presetType]);
 
   const submit = () => {
     const n = name.trim();
@@ -119,33 +121,40 @@ export default function ExpenseFormModal({
           <Pressable style={[styles.card, { backgroundColor: colors.cardBg }]}>
             <ScrollView keyboardShouldPersistTaps="handled">
               <Text style={[styles.title, { color: colors.text }]}>
-                {mode === "edit" ? "Edit" : "Add"} entry
+                {mode === "edit"
+                  ? "Edit entry"
+                  : presetType
+                  ? `Add ${presetType === "plus" ? "income" : "spend"}`
+                  : "Add entry"}
               </Text>
 
-              <View style={styles.typeRow}>
-                <Pressable
-                  style={[
-                    styles.typeBtn,
-                    { backgroundColor: type === "minus" ? colors.danger : colors.chipBg },
-                  ]}
-                  onPress={() => setType("minus")}
-                >
-                  <Text style={{ color: type === "minus" ? "#fff" : colors.text, fontWeight: "700" }}>
-                    − Spend
-                  </Text>
-                </Pressable>
-                <Pressable
-                  style={[
-                    styles.typeBtn,
-                    { backgroundColor: type === "plus" ? colors.success : colors.chipBg },
-                  ]}
-                  onPress={() => setType("plus")}
-                >
-                  <Text style={{ color: type === "plus" ? "#fff" : colors.text, fontWeight: "700" }}>
-                    + Income
-                  </Text>
-                </Pressable>
-              </View>
+              {/* Type toggle is hidden when the Spend/Income chooser already set it. */}
+              {!(mode === "add" && presetType) && (
+                <View style={styles.typeRow}>
+                  <Pressable
+                    style={[
+                      styles.typeBtn,
+                      { backgroundColor: type === "minus" ? colors.danger : colors.chipBg },
+                    ]}
+                    onPress={() => setType("minus")}
+                  >
+                    <Text style={{ color: type === "minus" ? "#fff" : colors.text, fontWeight: "700" }}>
+                      − Spend
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.typeBtn,
+                      { backgroundColor: type === "plus" ? colors.success : colors.chipBg },
+                    ]}
+                    onPress={() => setType("plus")}
+                  >
+                    <Text style={{ color: type === "plus" ? "#fff" : colors.text, fontWeight: "700" }}>
+                      + Income
+                    </Text>
+                  </Pressable>
+                </View>
+              )}
 
               <Text style={[styles.label, { color: colors.textMuted }]}>Name</Text>
               <TextInput
@@ -156,7 +165,7 @@ export default function ExpenseFormModal({
                 placeholderTextColor={colors.textMuted}
               />
 
-              <Text style={[styles.label, { color: colors.textMuted }]}>Amount (₹)</Text>
+              <Text style={[styles.label, { color: colors.textMuted }]}>Amount ({currencySymbol().trim()})</Text>
               <MoneyInput
                 style={inputStyle}
                 value={amount}

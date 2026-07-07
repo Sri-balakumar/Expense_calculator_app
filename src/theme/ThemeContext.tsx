@@ -1,8 +1,9 @@
 // Light/dark theme + a user-selectable accent color. Persists both to
 // AsyncStorage. The accent overrides the primary/button color across the app.
 
-import React, { createContext, useContext, useEffect, useState } from "react";
-import { useColorScheme } from "react-native";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { Animated, Dimensions, Easing, StyleSheet, useColorScheme, View } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { ThemeColors, lightColors, darkColors } from "./colors";
 
@@ -60,6 +61,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [accent, setAccentState] = useState<string>(DEFAULT_ACCENT);
   const [loaded, setLoaded] = useState(false);
 
+  // Diagonal wipe when switching light/dark: a new-theme "curtain" grows from the
+  // top-left corner to the bottom-right, the theme flips underneath, then it fades.
+  const wipe = useRef(new Animated.Value(0)).current;
+  const [transition, setTransition] = useState<{ color: string } | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -72,9 +78,35 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     })();
   }, []);
 
-  const setMode = (m: Mode) => {
+  // Instant set (no animation) — used internally.
+  const applyMode = (m: Mode) => {
     setModeState(m);
     AsyncStorage.setItem(STORAGE_KEY, m).catch(() => {});
+  };
+
+  const setMode = (m: Mode) => {
+    if (m === mode) return applyMode(m);
+    // A continuous diagonal wipe: a target-theme bar sweeps in from the top-left
+    // to fully cover the screen, the theme flips underneath, then the same bar
+    // keeps sweeping off the bottom-right — revealing the new theme behind it.
+    const target = m === "dark" ? darkColors : lightColors;
+    setTransition({ color: target.bgSoft });
+    wipe.setValue(0);
+    console.log("[Theme] wipe →", m);
+    Animated.timing(wipe, {
+      toValue: 1,
+      duration: 430,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => {
+      applyMode(m); // flip theme while fully covered
+      Animated.timing(wipe, {
+        toValue: 2,
+        duration: 360,
+        easing: Easing.inOut(Easing.cubic),
+        useNativeDriver: true,
+      }).start(() => setTransition(null));
+    });
   };
   const toggle = () => setMode(mode === "dark" ? "light" : "dark");
 
@@ -96,11 +128,48 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     primaryGradient: [accent, darken(accent)],
   };
 
+  // A big square rotated 45°; translating it along its local x-axis moves it
+  // diagonally (down-right). It sweeps in to cover the screen, then keeps going
+  // off the bottom-right — a clean top-left → bottom-right wipe.
+  const DIAG = Math.hypot(SCREEN.width, SCREEN.height);
+  const translateX = wipe.interpolate({
+    inputRange: [0, 1, 2],
+    outputRange: [-2 * DIAG, 0, 2 * DIAG],
+  });
+
   return (
     <ThemeContext.Provider value={{ mode, colors, accent, toggle, setMode, setAccent }}>
-      {children}
+      <View style={{ flex: 1 }}>
+        {children}
+        {transition && (
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <Animated.View
+              style={{
+                position: "absolute",
+                left: SCREEN.width / 2 - DIAG,
+                top: SCREEN.height / 2 - DIAG,
+                width: 2 * DIAG,
+                height: 2 * DIAG,
+                transform: [{ rotate: "45deg" }, { translateX }],
+              }}
+            >
+              {/* Soft-edged curtain: solid middle covers, translucent edges keep
+                  the leading/trailing wipe lines smooth instead of hard. */}
+              <LinearGradient
+                colors={["transparent", transition.color, transition.color, "transparent"]}
+                locations={[0, 0.2, 0.8, 1]}
+                start={{ x: 0, y: 0.5 }}
+                end={{ x: 1, y: 0.5 }}
+                style={{ flex: 1 }}
+              />
+            </Animated.View>
+          </View>
+        )}
+      </View>
     </ThemeContext.Provider>
   );
 }
+
+const SCREEN = Dimensions.get("window");
 
 export const useTheme = () => useContext(ThemeContext);

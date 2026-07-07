@@ -17,6 +17,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
 import { Card, Button, MoneyInput } from "../components/UI";
+import Watermark from "../components/Watermark";
 import {
   getGoal,
   addGoalEntry,
@@ -29,7 +30,7 @@ import {
   addExpense,
   getPlans,
 } from "../firebase/firestore";
-import { formatMoney, amountToWords } from "../util/money";
+import { formatMoney, amountToWords, currencySymbol } from "../util/money";
 import { toJsDate, formatDateTime } from "../util/date";
 import { GoalDoc, GoalEntry, MonthDoc, PlanDoc } from "../types";
 
@@ -160,7 +161,7 @@ export default function GoalScreen({ route, navigation }: any) {
   const onAddTarget = async () => {
     if (!user) return;
     const extra = await prompt({
-      title: "Add to target (₹)",
+      title: `Add to target (${currencySymbol().trim()})`,
       placeholder: "e.g. 10000",
       keyboardType: "numeric",
     });
@@ -262,6 +263,7 @@ export default function GoalScreen({ route, navigation }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         {/* Total savings + available */}
         <Card style={{ alignItems: "center", paddingVertical: 22 }}>
@@ -398,7 +400,7 @@ export default function GoalScreen({ route, navigation }: any) {
             />
             <MoneyInput
               style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8 }]}
-              placeholder="Amount (₹)"
+              placeholder={`Amount (${currencySymbol().trim()})`}
               value={entryAmount}
               onChangeText={setEntryAmount}
               autoFocus
@@ -430,7 +432,7 @@ export default function GoalScreen({ route, navigation }: any) {
             />
             <MoneyInput
               style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8 }]}
-              placeholder="Target (₹) — optional"
+              placeholder={`Target (${currencySymbol().trim()}) — optional`}
               value={editTarget}
               onChangeText={setEditTarget}
             />

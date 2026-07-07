@@ -21,7 +21,7 @@ import SelectField from "./SelectField";
 import { Button, MoneyInput } from "./UI";
 import { DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
-import { amountToWords } from "../util/money";
+import { amountToWords, currencySymbol } from "../util/money";
 
 export interface PlanPayResult {
   name: string;
@@ -119,7 +119,7 @@ export default function PlanPayModal({
                 </>
               )}
 
-              <Text style={[styles.label, { color: colors.textMuted }]}>Amount (₹)</Text>
+              <Text style={[styles.label, { color: colors.textMuted }]}>Amount ({currencySymbol().trim()})</Text>
               <MoneyInput
                 style={inputStyle}
                 value={amount}

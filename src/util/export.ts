@@ -10,7 +10,8 @@ import * as XLSX from "xlsx";
 import { Expense } from "../types";
 import { CATEGORY_LABELS, PAYMENT_LABELS } from "../constants/categories";
 import { toJsDate, weekOfMonth, formatDateMedium } from "./date";
-import { currencySymbol } from "./money";
+import { currencySymbol, formatMoney } from "./money";
+import { getDownloadPrefs, setDownloadFolder, folderLabel } from "./downloadPrefs";
 
 interface ExportContext {
   monthName: string;
@@ -72,8 +73,9 @@ function buildExportRows(expenses: Expense[], weekFilter: Set<number> | null, ct
   return { rows, totalSpent, totalIncome, remaining };
 }
 
+// Formats with the user's chosen currency symbol + grouping.
 function inr(n: number): string {
-  return "Rs. " + (Number(n) || 0).toLocaleString("en-IN");
+  return formatMoney(Number(n) || 0);
 }
 
 function safeFilename(name: string): string {
@@ -120,8 +122,8 @@ export async function exportPdf(
   const bodyHtml = data.rows
     .map((r, i) => {
       const cells = ctx.isBudget
-        ? [i + 1, r.Date, r.Name, r.Category, r.Type, r.Payment, r.Notes, r.Amount.toLocaleString("en-IN")]
-        : [i + 1, r.Date, r.Week, r.Name, r.Category, r.Type, r.Payment, r.Notes, r.Amount.toLocaleString("en-IN")];
+        ? [i + 1, r.Date, r.Name, r.Category, r.Type, r.Payment, r.Notes, formatMoney(r.Amount)]
+        : [i + 1, r.Date, r.Week, r.Name, r.Category, r.Type, r.Payment, r.Notes, formatMoney(r.Amount)];
       return `<tr>${cells.map((c, ci) => `<td class="${ci === cells.length - 1 ? "amt" : ""}">${esc(c)}</td>`).join("")}</tr>`;
     })
     .join("");
@@ -222,6 +224,22 @@ async function deliverFile(opts: {
   const { base64, filename, ext, mimeType } = opts;
   const SAF: any = (FileSystem as any).StorageAccessFramework;
   if (Platform.OS === "android" && SAF) {
+    // 1) If a fixed folder is configured, write straight there (no picker).
+    try {
+      const prefs = await getDownloadPrefs();
+      if (prefs.enabled && prefs.folderUri) {
+        const destUri = await SAF.createFileAsync(prefs.folderUri, filename, mimeType);
+        await FileSystem.writeAsStringAsync(destUri, base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        console.log("[Export] saved to configured folder", destUri);
+        return true;
+      }
+    } catch (e: any) {
+      // Permission may have been revoked — fall through to the picker.
+      console.warn("[Export] configured folder save failed, asking for folder", e?.message);
+    }
+    // 2) Otherwise ask for a folder each time (old behavior).
     try {
       const perm = await SAF.requestDirectoryPermissionsAsync();
       if (perm.granted) {
@@ -244,6 +262,26 @@ async function deliverFile(opts: {
   });
   await shareFile(cacheUri, mimeType);
   return false;
+}
+
+// Prompt the user to pick a folder and remember it for direct exports.
+// Returns the friendly folder name, or null if unavailable/cancelled.
+export async function pickDownloadFolder(): Promise<string | null> {
+  const SAF: any = (FileSystem as any).StorageAccessFramework;
+  if (Platform.OS !== "android" || !SAF) {
+    console.log("[Download] fixed folder only supported on Android");
+    return null;
+  }
+  try {
+    const perm = await SAF.requestDirectoryPermissionsAsync();
+    if (!perm.granted) return null;
+    const name = folderLabel(perm.directoryUri);
+    await setDownloadFolder(perm.directoryUri, name);
+    return name;
+  } catch (e: any) {
+    console.warn("[Download] pick folder failed", e?.message);
+    return null;
+  }
 }
 
 async function shareFile(uri: string, mimeType: string): Promise<void> {

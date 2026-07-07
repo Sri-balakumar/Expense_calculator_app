@@ -47,9 +47,6 @@ function Splash() {
           resizeMethod="resize"
           fadeDuration={0}
         />
-        <Text style={[styles.splashTitle, { color: colors.text }]}>
-          Expense Calculator
-        </Text>
         <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 20 }} />
       </Animated.View>
     </View>

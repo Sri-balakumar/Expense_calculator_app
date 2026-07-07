@@ -14,6 +14,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTheme } from "../theme/ThemeContext";
+import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "../components/UI";
 import MonthPickerModal from "../components/MonthPickerModal";
@@ -103,6 +104,7 @@ export default function MonthlyScreen({ navigation }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       {/* Gradient header with greeting + current-month summary */}
       <LinearGradient
         colors={colors.headerGradient}

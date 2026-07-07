@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Modal,
   Pressable,
@@ -14,6 +14,8 @@ import { useFeedback } from "../components/Feedback";
 import { Card, Button, MoneyInput } from "../components/UI";
 import SelectField from "../components/SelectField";
 import PlanPayModal, { PlanPayResult } from "../components/PlanPayModal";
+import CalendarModal, { CalItem } from "../components/CalendarModal";
+import Watermark from "../components/Watermark";
 import {
   getMonth,
   watchExpenses,
@@ -41,7 +43,7 @@ import {
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { PlanDoc, Expense, MonthDoc } from "../types";
 
-export default function PlanScreen({ route }: any) {
+export default function PlanScreen({ route, navigation }: any) {
   const { colors } = useTheme();
   const { user, profile } = useAuth();
   const { confirm, toast } = useFeedback();
@@ -73,6 +75,57 @@ export default function PlanScreen({ route }: any) {
   const [editCat, setEditCat] = useState("other");
   const [move, setMove] = useState<PlanDoc[] | null>(null);
   const [detail, setDetail] = useState<PlanDoc | null>(null);
+  const [calOpen, setCalOpen] = useState(false); // calendar popup
+
+  // Calendar marks: each plan's date is a planned spend (red dot).
+  const planDayKey = (p: PlanDoc) =>
+    dateToInputValue(toJsDate((p as any).date) || toJsDate(p.createdAt));
+  const calMarks = useMemo(() => {
+    const m: Record<string, { spend?: boolean; income?: boolean }> = {};
+    plans.forEach((p) => {
+      const key = planDayKey(p);
+      if (!m[key]) m[key] = {};
+      m[key].spend = true;
+    });
+    return m;
+  }, [plans]);
+  const calItemsForDate = useCallback(
+    (key: string): CalItem[] =>
+      plans
+        .filter((p) => planDayKey(p) === key)
+        .map((p) => ({
+          id: p.id,
+          name: p.name,
+          amount: Number(p.planned) || 0,
+          kind: "spend" as const,
+          sub: p.status,
+        })),
+    [plans]
+  );
+
+  // Calendar button in the header (rounded circle, top-right).
+  useEffect(() => {
+    if (!navigation) return;
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable
+          onPress={() => setCalOpen(true)}
+          hitSlop={10}
+          style={{
+            marginRight: 12,
+            width: 34,
+            height: 34,
+            borderRadius: 17,
+            backgroundColor: "rgba(255,255,255,0.2)",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ fontSize: 17 }}>📅</Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation]);
 
   useEffect(() => {
     if (!user) return;
@@ -378,6 +431,7 @@ export default function PlanScreen({ route }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         {/* Figures */}
         <Card>
@@ -421,7 +475,7 @@ export default function PlanScreen({ route }: any) {
           />
           <MoneyInput
             style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8 }]}
-            placeholder="Planned amount (₹)"
+            placeholder={`Planned amount (${currencySymbol().trim()})`}
             value={amount}
             onChangeText={(t) => {
               setAmount(t);
@@ -637,6 +691,15 @@ export default function PlanScreen({ route }: any) {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Calendar */}
+      <CalendarModal
+        visible={calOpen}
+        onClose={() => setCalOpen(false)}
+        title={`${monthName} · Plans`}
+        marks={calMarks}
+        itemsForDate={calItemsForDate}
+      />
 
       {/* Detail */}
       <Modal visible={!!detail} transparent animationType="fade" onRequestClose={() => setDetail(null)}>

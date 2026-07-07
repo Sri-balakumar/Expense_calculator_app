@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTheme } from "../theme/ThemeContext";
+import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
@@ -50,6 +51,7 @@ export default function PlansScreen({ navigation }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       <ScreenHeader title="Plans" subtitle="Plan upcoming spends per month." />
       <ScrollView
         contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 120 }}

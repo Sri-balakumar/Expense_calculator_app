@@ -11,6 +11,7 @@ import {
 import { BarChart } from "react-native-gifted-charts";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTheme } from "../theme/ThemeContext";
+import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
@@ -54,6 +55,7 @@ export default function YearScreen({ navigation }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       {/* Year nav inside the gradient header */}
       <ScreenHeader>
         <View style={styles.nav}>

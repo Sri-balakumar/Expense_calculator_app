@@ -16,6 +16,7 @@ import { useAuth } from "../context/AuthContext";
 import { fetchMonthsData, createMonth } from "../firebase/firestore";
 import { formatMoney } from "../util/money";
 import { MoneyInput } from "./UI";
+import { currencySymbol } from "../util/money";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -146,7 +147,7 @@ export default function MonthPickerModal({
               Create {pending}?
             </Text>
             <Text style={{ color: colors.textMuted, marginTop: 6, marginBottom: 12 }}>
-              Current balance (₹) — cash on hand now, added on top of your salary
+              Current balance ({currencySymbol().trim()}) — cash on hand now, added on top of your salary
               for this month.
             </Text>
             {lastRemaining > 0 && lastMonthName && (

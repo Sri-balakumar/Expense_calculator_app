@@ -15,9 +15,10 @@ import { useTheme } from "../theme/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
 import { Card, Button, MoneyInput } from "../components/UI";
+import Watermark from "../components/Watermark";
 import ScreenHeader from "../components/ScreenHeader";
 import { fetchBudgetsData, createBudget, watchGoals, createGoal } from "../firebase/firestore";
-import { formatMoney, amountToWords } from "../util/money";
+import { formatMoney, amountToWords, currencySymbol } from "../util/money";
 import { BudgetDoc, GoalDoc } from "../types";
 
 type BudgetRow = BudgetDoc & { spent: number; remaining: number };
@@ -71,7 +72,7 @@ export default function BudgetsScreen({ navigation }: any) {
     const name = await prompt({ title: "Budget name", placeholder: "e.g. Goa Trip" });
     if (!name) return;
     const amountStr = await prompt({
-      title: "Total amount (₹)",
+      title: `Total amount (${currencySymbol().trim()})`,
       placeholder: "e.g. 10000",
       keyboardType: "numeric",
     });
@@ -108,6 +109,7 @@ export default function BudgetsScreen({ navigation }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       <ScreenHeader
         title="Budgets & Goals"
         subtitle="Fixed spending pots, and savings goals you build up."
@@ -263,7 +265,7 @@ export default function BudgetsScreen({ navigation }: any) {
               onChangeText={setGoalName}
             />
             <Text style={[styles.label, { color: colors.textMuted, marginTop: 12 }]}>
-              Total amount you have to save (₹)
+              Total amount you have to save ({currencySymbol().trim()})
             </Text>
             <MoneyInput
               style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg }]}

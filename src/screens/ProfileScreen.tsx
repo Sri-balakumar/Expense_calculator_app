@@ -11,7 +11,15 @@ import {
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTheme, ACCENTS } from "../theme/ThemeContext";
+import Watermark from "../components/Watermark";
 import { useCurrency } from "../context/CurrencyContext";
+import {
+  getDownloadPrefs,
+  setDownloadEnabled,
+  clearDownloadFolder,
+  folderLabel,
+} from "../util/downloadPrefs";
+import { pickDownloadFolder } from "../util/export";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
 import { Button, Card, Field, MoneyInput } from "../components/UI";
@@ -32,7 +40,7 @@ import {
   updatePaymentMethod,
   deletePaymentMethod,
 } from "../firebase/firestore";
-import { formatMoney, amountToWords } from "../util/money";
+import { formatMoney, amountToWords, currencySymbol } from "../util/money";
 import { CATEGORY_PALETTE, CATEGORY_KEYS, PAYMENT_METHODS } from "../constants/categories";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { usePaymentMethods } from "../context/PaymentMethodsContext";
@@ -53,6 +61,9 @@ export default function ProfileScreen() {
   const [pickedCur, setPickedCur] = useState(curCode); // pending currency choice (Save to apply)
   const [curModal, setCurModal] = useState(false);
   const [curSearch, setCurSearch] = useState("");
+  // Download folder prefs
+  const [dlEnabled, setDlEnabled] = useState(false);
+  const [dlFolder, setDlFolder] = useState<string | null>(null);
   // Budgets + recurring apply to spend categories (everything except salary).
   const budgetCats = categories.filter((c) => c.key !== "salary");
   const recCatOpts = options(false);
@@ -121,8 +132,45 @@ export default function ProfileScreen() {
       setSalary(String(profile?.salary || ""));
       setMainBalance(String(profile?.mainBalance || ""));
       loadLists();
+      getDownloadPrefs().then((p) => {
+        setDlEnabled(p.enabled);
+        // Show the full path derived from the saved folder URI.
+        setDlFolder(p.folderUri ? folderLabel(p.folderUri) : null);
+      });
     }, [loadLists, profile])
   );
+
+  const toggleDownloadFolder = async () => {
+    const next = !dlEnabled;
+    if (!next) {
+      // Turning OFF → confirm first.
+      const ok = await confirm({
+        title: "Turn off fixed folder?",
+        message: "Exports will ask you to pick a folder each time you download.",
+        confirmText: "Turn off",
+        danger: false,
+      });
+      if (!ok) return;
+      setDlEnabled(false);
+      await setDownloadEnabled(false);
+      toast("Exports will ask for a folder each time.", "info");
+      return;
+    }
+    // Turning ON → enable, and prompt to pick a folder if none set yet.
+    setDlEnabled(true);
+    await setDownloadEnabled(true);
+    if (!dlFolder) chooseDownloadFolder();
+  };
+
+  const chooseDownloadFolder = async () => {
+    const name = await pickDownloadFolder();
+    if (name) {
+      setDlFolder(name);
+      setDlEnabled(true);
+      await setDownloadEnabled(true);
+      toast(`Exports will save to "${name}".`, "success");
+    }
+  };
 
   const saveProfile = async () => {
     if (!user) return;
@@ -403,6 +451,7 @@ export default function ProfileScreen() {
       title: "Log out?",
       message: "You'll need to sign in again with your email and password.",
       confirmText: "Log out",
+      danger: false, // use the accent color, not red
     });
     if (!ok) return;
     await signOutUser();
@@ -452,9 +501,10 @@ export default function ProfileScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       <ScreenHeader title="Profile" subtitle={user?.email || undefined} />
       <ScrollView
-        style={{ flex: 1, backgroundColor: colors.bgSoft }}
+        style={{ flex: 1, backgroundColor: "transparent" }}
         contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 120 }}
         keyboardShouldPersistTaps="handled"
       >
@@ -462,14 +512,14 @@ export default function ProfileScreen() {
       <Card>
         <Text style={[styles.cardTitle, { color: colors.text }]}>Personal info</Text>
         <Field label="Name" value={name} onChangeText={setName} />
-        <Field label="Monthly salary (₹)" money value={salary} onChangeText={setSalary} keyboardType="numeric" />
+        <Field label={`Monthly salary (${currencySymbol().trim()})`} money value={salary} onChangeText={setSalary} keyboardType="numeric" />
         {Number(salary) > 0 && (
           <Text style={{ color: colors.primary, fontSize: 12, marginTop: -8, marginBottom: 10, fontStyle: "italic" }}>
             {amountToWords(salary)} only
           </Text>
         )}
         <Field
-          label="Main balance (₹) — savings, not spent from months"
+          label={`Main balance (${currencySymbol().trim()}) — savings, not spent from months`}
           money
           value={mainBalance}
           onChangeText={setMainBalance}
@@ -672,7 +722,137 @@ export default function ProfileScreen() {
         </Pressable>
       </Card>
 
-      <Button title="Log out" variant="danger" onPress={onLogout} />
+      {/* Downloads */}
+      <Card>
+        <Text style={[styles.cardTitle, { color: colors.text }]}>Downloads</Text>
+        <View style={styles.between}>
+          <Text style={{ color: colors.text, flexShrink: 1, paddingRight: 12 }}>
+            Save exports to a fixed folder
+          </Text>
+          <Pressable
+            onPress={toggleDownloadFolder}
+            style={{
+              width: 52,
+              height: 30,
+              borderRadius: 15,
+              padding: 3,
+              backgroundColor: dlEnabled ? colors.primary : colors.chipBg,
+              alignItems: dlEnabled ? "flex-end" : "flex-start",
+            }}
+          >
+            <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: "#fff" }} />
+          </Pressable>
+        </View>
+        {dlEnabled ? (
+          <>
+            <Pressable
+              onPress={chooseDownloadFolder}
+              style={[
+                styles.curField,
+                { backgroundColor: colors.inputBg, borderColor: colors.border, marginTop: 12 },
+              ]}
+            >
+              <Text
+                style={{ color: dlFolder ? colors.text : colors.textMuted, fontSize: 15, flexShrink: 1 }}
+                numberOfLines={1}
+              >
+                📁 {dlFolder || "Tap to choose a folder"}
+              </Text>
+              <Text style={{ color: colors.primary, fontSize: 13, fontWeight: "700" }}>
+                {dlFolder ? "Change" : "Choose"}
+              </Text>
+            </Pressable>
+            <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 8 }}>
+              PDF/Excel go straight here — no folder prompt each time.
+            </Text>
+          </>
+        ) : (
+          <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 8 }}>
+            You'll pick a folder each time you export.
+          </Text>
+        )}
+      </Card>
+
+      <Button title="Log out" variant="primary" onPress={onLogout} />
+
+      {/* Credit + version */}
+      <Text style={{ color: colors.textMuted, textAlign: "center", fontSize: 12, marginTop: 18 }}>
+        Sri Balakumar  🤍  |  version 1.0.0
+      </Text>
+
+      {/* Currency picker (search + symbol/name rows + Save inside) */}
+      <Modal visible={curModal} transparent animationType="fade" onRequestClose={() => setCurModal(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setCurModal(false)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Choose currency</Text>
+            <TextInput
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginBottom: 10 },
+              ]}
+              placeholder="Search (₹, USD, Rupee…)"
+              placeholderTextColor={colors.textMuted}
+              value={curSearch}
+              onChangeText={setCurSearch}
+              autoFocus
+            />
+            <ScrollView style={{ maxHeight: 320 }} keyboardShouldPersistTaps="handled">
+              {currencies
+                .filter((c) => {
+                  const q = curSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    c.code.toLowerCase().includes(q) ||
+                    c.name.toLowerCase().includes(q) ||
+                    c.symbol.toLowerCase().includes(q)
+                  );
+                })
+                .map((c) => {
+                  const sel = pickedCur === c.code;
+                  return (
+                    <Pressable
+                      key={c.code}
+                      onPress={() => setPickedCur(c.code)}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        paddingVertical: 12,
+                        paddingHorizontal: 12,
+                        borderRadius: 10,
+                        marginBottom: 6,
+                        backgroundColor: sel ? colors.chipBg : "transparent",
+                        borderWidth: 1,
+                        borderColor: sel ? colors.primary : colors.border,
+                      }}
+                    >
+                      {/* left: symbol · right: name */}
+                      <Text style={{ color: sel ? colors.primary : colors.text, fontSize: 18, fontWeight: "800", minWidth: 44 }}>
+                        {c.symbol.trim()}
+                      </Text>
+                      <Text style={{ color: sel ? colors.primary : colors.text, fontSize: 15, fontWeight: "600", flex: 1, textAlign: "right" }}>
+                        {c.name}
+                        {sel ? "  ✓" : ""}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+            </ScrollView>
+            <View style={styles.actions}>
+              <Button title="Cancel" variant="secondary" onPress={() => setCurModal(false)} style={{ flex: 1 }} />
+              <Button
+                title="Save"
+                onPress={() => {
+                  console.log("[Profile] save currency", pickedCur);
+                  setCurModal(false);
+                  if (pickedCur !== curCode) setCurrency(pickedCur); // remounts → changes everywhere
+                }}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Add recurring modal */}
       <Modal visible={recModal} transparent animationType="fade" onRequestClose={() => setRecModal(false)}>
@@ -682,7 +862,7 @@ export default function ProfileScreen() {
               {editRecId ? "Edit recurring" : "Add recurring"}
             </Text>
             <Field label="Name" value={recName} onChangeText={setRecName} placeholder="e.g. Rent" />
-            <Field label="Amount (₹)" money value={recAmount} onChangeText={setRecAmount} keyboardType="numeric" placeholder="e.g. 15000" />
+            <Field label={`Amount (${currencySymbol().trim()})`} money value={recAmount} onChangeText={setRecAmount} keyboardType="numeric" placeholder="e.g. 15000" />
             <Text style={{ color: colors.textMuted, fontSize: 13, fontWeight: "600", marginBottom: 6 }}>Category</Text>
             <SelectField
               title="Category"
@@ -878,4 +1058,20 @@ const styles = StyleSheet.create({
   },
   modalCard: { width: "100%", maxWidth: 420, borderRadius: 20, padding: 20 },
   actions: { flexDirection: "row", gap: 10, marginTop: 18 },
+  input: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+  },
+  curField: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
 });

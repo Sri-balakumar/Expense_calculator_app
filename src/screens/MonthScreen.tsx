@@ -19,6 +19,9 @@ import Calculator from "../components/Calculator";
 import DownloadAnimation from "../components/DownloadAnimation";
 import ExpenseFormModal, { ExpenseFormResult } from "../components/ExpenseFormModal";
 import MultiSelectField from "../components/MultiSelectField";
+import CalendarModal, { CalItem } from "../components/CalendarModal";
+import Watermark from "../components/Watermark";
+import IncomeAddAnimation from "../components/IncomeAddAnimation";
 import {
   TrackerType,
   getMonth,
@@ -37,7 +40,7 @@ import {
   addPlan,
   updatePlan,
 } from "../firebase/firestore";
-import { formatMoney } from "../util/money";
+import { formatMoney, currencySymbol } from "../util/money";
 import { exportPdf, exportExcel, attendedWeeks } from "../util/export";
 import {
   toJsDate,
@@ -91,9 +94,13 @@ export default function MonthScreen({ route, navigation }: any) {
   const [formVisible, setFormVisible] = useState(false);
   const [formMode, setFormMode] = useState<"add" | "edit">("add");
   const [editTarget, setEditTarget] = useState<Expense | null>(null);
+  const [typeChooser, setTypeChooser] = useState(false); // Spend/Income step before the form
+  const [presetType, setPresetType] = useState<"minus" | "plus" | undefined>(undefined);
 
   const [calc, setCalc] = useState<{ value: number; title: string; expr?: string } | null>(null);
   const [details, setDetails] = useState<Expense | null>(null);
+  const [calOpen, setCalOpen] = useState(false); // calendar popup
+  const [addAnim, setAddAnim] = useState<null | "plus" | "minus">(null); // +/− drop on add
 
   // Assign monthly expense(s) to a plan (link them — the expenses stay in Monthly).
   const [assignExps, setAssignExps] = useState<Expense[]>([]);
@@ -275,6 +282,54 @@ export default function MonthScreen({ route, navigation }: any) {
     return Array.from(map.entries()).map(([week, items]) => ({ week, items }));
   }, [filtered, isBudget, filter, catFilter, weekFilter, search]);
 
+  // --- calendar marks (red = spend day, green = income day) ---
+  const calMarks = useMemo(() => {
+    const m: Record<string, { spend?: boolean; income?: boolean }> = {};
+    expenses.forEach((e) => {
+      const key = dateToInputValue(toJsDate(e.createdAt));
+      if (!m[key]) m[key] = {};
+      if (e.type === "plus") m[key].income = true;
+      else m[key].spend = true;
+    });
+    return m;
+  }, [expenses]);
+  const calItemsForDate = useCallback(
+    (key: string): CalItem[] =>
+      expenses
+        .filter((e) => dateToInputValue(toJsDate(e.createdAt)) === key)
+        .map((e) => ({
+          id: e.id,
+          name: e.name,
+          amount: Number(e.amount) || 0,
+          kind: (e.type === "plus" ? "income" : "spend") as "income" | "spend",
+          sub: catLabel(e.category),
+        })),
+    [expenses, catLabel]
+  );
+
+  // Calendar button in the header (rounded circle, top-right).
+  useEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable
+          onPress={() => setCalOpen(true)}
+          hitSlop={10}
+          style={{
+            marginRight: 12,
+            width: 34,
+            height: 34,
+            borderRadius: 17,
+            backgroundColor: "rgba(255,255,255,0.2)",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ fontSize: 17 }}>📅</Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation]);
+
   // --- weekly breakdown (months only) ---
   const weeklyTotals = useMemo(() => {
     const t: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -304,7 +359,15 @@ export default function MonthScreen({ route, navigation }: any) {
   const onAdd = () => {
     fabSpin.setValue(0);
     Animated.timing(fabSpin, { toValue: 1, duration: 400, useNativeDriver: true }).start();
-    console.log("[FAB] + tapped (spin)");
+    console.log("[FAB] + tapped → choose spend/income");
+    setTypeChooser(true); // step 1: ask spend or income
+  };
+
+  // Step 2: after picking a type, open the details form with it preset.
+  const pickType = (t: "minus" | "plus") => {
+    console.log("[Add] type chosen", t);
+    setTypeChooser(false);
+    setPresetType(t);
     setFormMode("add");
     setEditTarget(null);
     setFormVisible(true);
@@ -313,6 +376,7 @@ export default function MonthScreen({ route, navigation }: any) {
   const onEdit = (exp: Expense) => {
     setFormMode("edit");
     setEditTarget(exp);
+    setPresetType(undefined); // edit keeps its own type + shows the toggle
     setFormVisible(true);
   };
 
@@ -352,7 +416,8 @@ export default function MonthScreen({ route, navigation }: any) {
         toast("Entry updated", "success");
       } else {
         await addExpense(user.uid, type, id, payload);
-        toast((r.type === "plus" ? "Income" : "Expense") + " added", "success");
+        // Play the +/− drop animation; the toast fires when it lands.
+        setAddAnim(r.type);
       }
     } catch {
       toast("Couldn't save. Try again.", "error");
@@ -452,7 +517,7 @@ export default function MonthScreen({ route, navigation }: any) {
   const onEditBalance = async () => {
     if (!user || isBudget) return;
     const val = await prompt({
-      title: "Current balance (₹)",
+      title: `Current balance (${currencySymbol().trim()})`,
       placeholder: "e.g. 5000",
       defaultValue: String(currentBalance || ""),
       keyboardType: "numeric",
@@ -615,6 +680,7 @@ export default function MonthScreen({ route, navigation }: any) {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
+      <Watermark />
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 110 }}>
         {/* Total card */}
         <Card style={{ alignItems: "center", paddingVertical: 22 }}>
@@ -1045,6 +1111,7 @@ export default function MonthScreen({ route, navigation }: any) {
         mode={formMode}
         initial={editTarget}
         initialDate={editTarget ? dateToInputValue(toJsDate(editTarget.createdAt)) : undefined}
+        presetType={formMode === "add" ? presetType : undefined}
         onClose={() => setFormVisible(false)}
         onSubmit={submitForm}
         onError={(m) => toast(m, "error")}
@@ -1056,6 +1123,56 @@ export default function MonthScreen({ route, navigation }: any) {
         initialExpr={calc?.expr}
         onClose={() => setCalc(null)}
       />
+      <IncomeAddAnimation
+        visible={!!addAnim}
+        variant={addAnim || "plus"}
+        onDone={() => {
+          const wasPlus = addAnim === "plus";
+          setAddAnim(null);
+          toast((wasPlus ? "Income" : "Expense") + " added", "success");
+        }}
+      />
+
+      <CalendarModal
+        visible={calOpen}
+        onClose={() => setCalOpen(false)}
+        title={`${name} · Calendar`}
+        marks={calMarks}
+        itemsForDate={calItemsForDate}
+        initialDate={expenses.length ? toJsDate(expenses[0].createdAt) || undefined : undefined}
+      />
+
+      {/* Step 1: Spend or Income? */}
+      <Modal visible={typeChooser} transparent animationType="fade" onRequestClose={() => setTypeChooser(false)}>
+        <Pressable style={styles.detailsBackdrop} onPress={() => setTypeChooser(false)}>
+          <Pressable style={[styles.detailsCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18, marginBottom: 4 }}>
+              What are you adding?
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 16 }}>
+              Pick one — then fill in the details.
+            </Text>
+            <View style={{ flexDirection: "row", gap: 12 }}>
+              <Pressable
+                onPress={() => pickType("minus")}
+                style={{ flex: 1, backgroundColor: colors.danger, borderRadius: 14, paddingVertical: 18, alignItems: "center" }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 16 }}>− Spend</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => pickType("plus")}
+                style={{ flex: 1, backgroundColor: colors.success, borderRadius: 14, paddingVertical: 18, alignItems: "center" }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 16 }}>+ Income</Text>
+              </Pressable>
+            </View>
+            <Pressable onPress={() => setTypeChooser(false)} style={{ marginTop: 14, alignSelf: "center" }}>
+              <Text style={{ color: colors.textMuted, fontWeight: "700" }}>Cancel</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <DetailsModal
         exp={details}
         type={type}
