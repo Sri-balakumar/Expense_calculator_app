@@ -1,8 +1,9 @@
 // Root navigation + AuthGate. Swaps between the auth stack and the app stack
 // based on onAuthStateChanged. Admin users get routed to the admin home.
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Animated, Image, StyleSheet, Text, View } from "react-native";
+import * as SplashScreen from "expo-splash-screen";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { useAuth } from "../context/AuthContext";
 import { usePin } from "../context/PinContext";
@@ -20,23 +21,25 @@ const Stack = createNativeStackNavigator();
 // app boots, held for a minimum time so the branding is actually visible.
 const SPLASH_IMAGE = require("../../assets/splash-icon.png");
 const MIN_SPLASH_MS = 1800;
+// Same purple as the native splash in app.json, so the handoff is invisible.
+// colors.brand is fixed in both themes — the native layer can't know which
+// theme the user persisted, so the splash must not depend on it.
+const SPLASH_BG = "#2e294e";
 
 function Splash() {
   const { colors } = useTheme();
-  // Entrance animation: fade + gentle scale-up so the splash eases in.
-  const opacity = useRef(new Animated.Value(0)).current;
-  const scale = useRef(new Animated.Value(0.9)).current;
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(opacity, { toValue: 1, duration: 450, useNativeDriver: true }),
-      Animated.spring(scale, { toValue: 1, friction: 7, tension: 60, useNativeDriver: true }),
-    ]).start();
-  }, [opacity, scale]);
+
+  // No entrance animation: this screen is painted identically by the native
+  // splash first, so fading or scaling in would show a visible seam.
+  // Handing off only once this has laid out guarantees no blank frame between.
+  const onLayout = useCallback(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
 
   console.log("[Splash] rendering in-app splash (image)");
   return (
-    <View style={[styles.splash, { backgroundColor: colors.bgSoft }]}>
-      <Animated.View style={{ alignItems: "center", opacity, transform: [{ scale }] }}>
+    <View style={[styles.splash, { backgroundColor: SPLASH_BG }]} onLayout={onLayout}>
+      <View style={{ alignItems: "center" }}>
         {/* Transparent logo art only — no white backing tile. */}
         <Image
           source={SPLASH_IMAGE}
@@ -48,7 +51,7 @@ function Splash() {
           fadeDuration={0}
         />
         <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 20 }} />
-      </Animated.View>
+      </View>
     </View>
   );
 }

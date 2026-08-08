@@ -14,6 +14,8 @@ import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
+import HelpFab from "../components/HelpFab";
+import { HELP_PLANS } from "../constants/help";
 import { fetchMonthsData } from "../firebase/firestore";
 import { formatMoney } from "../util/money";
 import { MonthData } from "../types";
@@ -54,7 +56,7 @@ export default function PlansScreen({ navigation }: any) {
       <Watermark />
       <ScreenHeader title="Plans" subtitle="Plan upcoming spends per month." />
       <ScrollView
-        contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 120 }}
+        contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 170 }}
         refreshControl={<RefreshControl refreshing={false} onRefresh={load} />}
       >
         {months.length === 0 ? (
@@ -96,6 +98,7 @@ export default function PlansScreen({ navigation }: any) {
           ))
         )}
       </ScrollView>
+      <HelpFab {...HELP_PLANS} />
     </View>
   );
 }

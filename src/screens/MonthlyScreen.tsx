@@ -18,6 +18,8 @@ import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "../components/UI";
 import MonthPickerModal from "../components/MonthPickerModal";
+import HelpFab from "../components/HelpFab";
+import { HELP_MONTHLY } from "../constants/help";
 import { fetchMonthsData } from "../firebase/firestore";
 import { formatMoney } from "../util/money";
 import { useCategories } from "../context/CategoriesContext";
@@ -140,7 +142,7 @@ export default function MonthlyScreen({ navigation }: any) {
       </LinearGradient>
 
       <ScrollView
-        contentContainerStyle={{ paddingTop: 6, paddingBottom: 120 }}
+        contentContainerStyle={{ paddingTop: 6, paddingBottom: 170 }}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={false} onRefresh={load} />}
       >
@@ -230,6 +232,7 @@ export default function MonthlyScreen({ navigation }: any) {
         onClose={() => setPicker(false)}
         onOpenMonth={openMonth}
       />
+      <HelpFab {...HELP_MONTHLY} />
     </View>
   );
 }

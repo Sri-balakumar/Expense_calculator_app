@@ -71,11 +71,22 @@ export interface PlanPayment {
   paidAt?: any;
 }
 
+// One recorded change to a plan after it was created — shown as history in the
+// plan's detail popup ("₹100 → ₹150"). `at` is a plain Date: Firestore rejects
+// serverTimestamp() inside array elements.
+export interface PlanEdit {
+  at: any;
+  field: "planned" | "name" | "category";
+  from: string | number;
+  to: string | number;
+}
+
 export interface PlanDoc {
   id: string;
   name: string;
   planned: number;
   category?: string;
+  edits?: PlanEdit[];
   status: PlanStatus;
   actual?: number | null;
   paid?: number;

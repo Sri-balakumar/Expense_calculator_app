@@ -41,7 +41,7 @@ import {
   formatDateMedium,
 } from "../util/date";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
-import { PlanDoc, Expense, MonthDoc } from "../types";
+import { PlanDoc, PlanEdit, Expense, MonthDoc } from "../types";
 
 export default function PlanScreen({ route, navigation }: any) {
   const { colors } = useTheme();
@@ -75,7 +75,13 @@ export default function PlanScreen({ route, navigation }: any) {
   const [editCat, setEditCat] = useState("other");
   const [move, setMove] = useState<PlanDoc[] | null>(null);
   const [detail, setDetail] = useState<PlanDoc | null>(null);
+  // Which item the user is removing, while we ask what to do with its entry.
+  const [removeAsk, setRemoveAsk] = useState<{ plan: PlanDoc; idx: number; pay: any } | null>(null);
   const [calOpen, setCalOpen] = useState(false); // calendar popup
+
+  // `detail` is only a handle on WHICH plan is open — always read the live doc
+  // from the snapshot so the popup reflects edits and payments as they happen.
+  const detailPlan = detail ? plans.find((x) => x.id === detail.id) || detail : null;
 
   // Calendar marks: each plan's date is a planned spend (red dot).
   const planDayKey = (p: PlanDoc) =>
@@ -293,7 +299,16 @@ export default function PlanScreen({ route, navigation }: any) {
         paidAt: inputValueToDate(r.dateValue),
       });
       const newPaid = (Number(p.paid) || 0) + r.amount;
-      await updatePlan(user.uid, monthId, p.id, { paid: newPaid, payments, status: "partial" });
+      const planned = Number(p.planned) || 0;
+      // Once it's fully paid the plan is done — otherwise its "Part" button stays
+      // live and the next tap records the whole amount a second time.
+      const done = planned > 0 && newPaid >= planned;
+      await updatePlan(user.uid, monthId, p.id, {
+        paid: newPaid,
+        payments,
+        status: done ? "done" : "partial",
+        actual: done ? newPaid : null,
+      });
       const left = Math.max(0, (Number(p.planned) || 0) - newPaid);
       toast(`${formatMoney(r.amount)} paid · ${formatMoney(left)} left`, "success");
     }
@@ -321,24 +336,37 @@ export default function PlanScreen({ route, navigation }: any) {
         ? await getPlan(user.uid, p.movedToMonthId, p.movedToPlanId).catch(() => null)
         : null;
     const copyPaid = Number(copy?.paid) || 0;
-    const copyPayCount = Array.isArray(copy?.payments) ? (copy!.payments as any[]).length : 0;
-    const used = !!copy && (copyPaid > 0 || copyPayCount > 0);
+    // Only payments the plan itself recorded will be deleted — expenses the user
+    // entered in Monthly and assigned (linked) are theirs and stay put.
+    const copyOwnPays = (Array.isArray(copy?.payments) ? (copy!.payments as any[]) : []).filter(
+      (pay) => pay.expenseId && !pay.linked
+    );
+    const allCopyPays = Array.isArray(copy?.payments) ? (copy!.payments as any[]) : [];
+    const copyPayCount = copyOwnPays.length;
+    const linkedCount = allCopyPays.length - copyPayCount;
+    const used = !!copy && (copyPaid > 0 || allCopyPays.length > 0);
 
     const ok = await confirm({
       title: `Undo move of "${p.name}"?`,
       message: used
-        ? `⚠️ It's already been used in ${p.movedTo} — ${formatMoney(copyPaid)} paid across ${copyPayCount} payment${copyPayCount !== 1 ? "s" : ""}. Undoing will delete that copy and remove those recorded expenses. Continue?`
+        ? `⚠️ It's already been used in ${p.movedTo} — ${formatMoney(copyPaid)} paid across ${allCopyPays.length} payment${allCopyPays.length !== 1 ? "s" : ""}. Undoing deletes that copy` +
+          (copyPayCount
+            ? ` and removes the ${copyPayCount} expense${copyPayCount !== 1 ? "s" : ""} it recorded there`
+            : "") +
+          (linkedCount
+            ? `. Your own ${linkedCount} entr${linkedCount !== 1 ? "ies" : "y"} in ${p.movedTo} stay — they're just unlinked`
+            : "") +
+          `. Continue?`
         : `Brings it back to ${monthName}${p.movedTo ? ` and removes the copy in ${p.movedTo}` : ""}.`,
       confirmText: "Undo move",
     });
     if (!ok) return;
 
     // Clean up the copy's recorded expenses in the target month, then delete it.
+    // Linked expenses came from the user's Monthly list — never delete those.
     if (copy && p.movedToMonthId) {
-      const payments = Array.isArray(copy.payments) ? copy.payments : [];
-      for (const pay of payments) {
-        if (pay.expenseId)
-          await deleteExpense(user.uid, "month", p.movedToMonthId, pay.expenseId).catch(() => {});
+      for (const pay of copyOwnPays) {
+        await deleteExpense(user.uid, "month", p.movedToMonthId, pay.expenseId).catch(() => {});
       }
       if (copy.pushedExpenseId)
         await deleteExpense(user.uid, "month", p.movedToMonthId, copy.pushedExpenseId).catch(() => {});
@@ -360,12 +388,30 @@ export default function PlanScreen({ route, navigation }: any) {
 
   const onDelete = async (p: PlanDoc) => {
     if (!user) return;
+    // A moved plan owns a copy in another month; deleting it here would strand
+    // that copy with expense references pointing at documents we're about to
+    // delete. Send the user through "Undo move" instead.
+    if (p.status === "moved" && p.movedToPlanId) {
+      await confirm({
+        title: `"${p.name}" has moved`,
+        message: `It now lives in ${p.movedTo || "another month"}. Undo the move first, then delete it — or delete it there.`,
+        confirmText: "OK",
+      });
+      return;
+    }
     const payments = Array.isArray(p.payments) ? p.payments : [];
     const toRemove = payments.filter((pay) => pay.expenseId && !pay.linked);
     const expCount = toRemove.length + (p.pushedExpenseId ? 1 : 0);
+    const linkedCount = payments.length - toRemove.length;
     const ok = await confirm({
       title: `Delete "${p.name}"?`,
-      message: expCount > 0 ? `Also removes the ${expCount > 1 ? expCount + " expenses" : "expense"} it recorded in ${monthName}.` : "This removes the plan.",
+      message:
+        (expCount > 0
+          ? `Also removes the ${expCount > 1 ? expCount + " expenses" : "expense"} it recorded in ${monthName}.`
+          : "This removes the plan.") +
+        (linkedCount
+          ? ` Your own ${linkedCount} entr${linkedCount !== 1 ? "ies" : "y"} in ${monthName} stay.`
+          : ""),
       confirmText: "Delete",
     });
     if (!ok) return;
@@ -375,20 +421,49 @@ export default function PlanScreen({ route, navigation }: any) {
     toast("Plan deleted.", "success");
   };
 
-  // Remove one added item from a plan (unlink it). The linked expense stays in
-  // Monthly; only its association with this plan (and the paid total) is removed.
-  const removePayment = async (plan: PlanDoc, idx: number) => {
+  // Remove one added item from a plan. If a real entry in Monthly is behind it,
+  // ask whether to keep that entry or delete it everywhere — deleting is real
+  // money leaving the month's totals, so it's never assumed.
+  const removePayment = (plan: PlanDoc, idx: number) => {
+    const pay = (Array.isArray(plan.payments) ? plan.payments : [])[idx];
+    if (!pay) return;
+    if (!pay.expenseId) return applyRemovePayment(plan, idx, false); // nothing in Monthly
+    setRemoveAsk({ plan, idx, pay });
+  };
+
+  const applyRemovePayment = async (plan: PlanDoc, idx: number, alsoDeleteEntry: boolean) => {
     if (!user) return;
+    setRemoveAsk(null);
     const payments = Array.isArray(plan.payments) ? plan.payments.slice() : [];
     const removed = payments.splice(idx, 1)[0];
     if (!removed) return;
+    if (alsoDeleteEntry && removed.expenseId) {
+      await deleteExpense(user.uid, "month", monthId, removed.expenseId).catch(() => {});
+    }
     const newPaid = Math.max(0, (Number(plan.paid) || 0) - (Number(removed.amount) || 0));
-    const status = payments.length === 0 && newPaid <= 0 ? "pending" : "partial";
-    await updatePlan(user.uid, monthId, plan.id, { payments, paid: newPaid, status, actual: null });
-    console.log("[Plan] removed item from plan", { plan: plan.name, item: removed.name, newPaid });
-    // Keep the open detail modal in sync so the over-warning updates live.
-    setDetail({ ...plan, payments, paid: newPaid, status } as PlanDoc);
-    toast(`Removed "${removed.name || "item"}"`, "success");
+    // A moved plan keeps its status and its record of what was spent here —
+    // recomputing would resurrect it in this month while the copy still exists.
+    const isMovedPlan = plan.status === "moved";
+    const status = isMovedPlan
+      ? plan.status
+      : payments.length === 0 && newPaid <= 0
+      ? "pending"
+      : "partial";
+    const updates: any = { payments, paid: newPaid, status };
+    if (!isMovedPlan) updates.actual = null;
+    await updatePlan(user.uid, monthId, plan.id, updates);
+    console.log("[Plan] removed item from plan", {
+      plan: plan.name,
+      item: removed.name,
+      newPaid,
+      alsoDeleteEntry,
+    });
+    toast(
+      alsoDeleteEntry
+        ? `Deleted "${removed.name || "item"}" from the plan and ${monthName}`
+        : `Removed "${removed.name || "item"}" from the plan`,
+      "success"
+    );
   };
 
   // ---- edit ----
@@ -404,7 +479,37 @@ export default function PlanScreen({ route, navigation }: any) {
     const planned = Number(editAmount);
     if (!n) return toast("Enter a plan name.", "error");
     if (!planned || planned <= 0) return toast("Enter a valid amount.", "error");
-    await updatePlan(user.uid, monthId, edit.id, { name: n, planned, category: editCat });
+
+    // Record what changed, so the detail popup can explain why the plan says
+    // 150 when the entry underneath it says 100. `edit` holds the old values.
+    const at = new Date();
+    const history: PlanEdit[] = [];
+    const oldPlanned = Number(edit.planned) || 0;
+    const oldCat = edit.category || "other";
+    if (oldPlanned !== planned) history.push({ at, field: "planned", from: oldPlanned, to: planned });
+    if (edit.name !== n) history.push({ at, field: "name", from: edit.name, to: n });
+    if (oldCat !== editCat) history.push({ at, field: "category", from: oldCat, to: editCat });
+    if (history.length === 0) {
+      setEdit(null);
+      return; // nothing actually changed — don't log noise
+    }
+
+    // Lowering the plan below what's already been spent flips it straight into
+    // the red "over" state, so make that deliberate.
+    const paid = Number(edit.paid) || 0;
+    if (planned < paid) {
+      const ok = await confirm({
+        title: "Below what's already spent",
+        message: `${formatMoney(paid)} has been added to "${edit.name}". Setting the plan to ${formatMoney(planned)} marks it over by ${formatMoney(paid - planned)}. Continue?`,
+        confirmText: "Set anyway",
+        danger: false,
+      });
+      if (!ok) return;
+    }
+
+    const edits = [...(Array.isArray(edit.edits) ? edit.edits : []), ...history];
+    await updatePlan(user.uid, monthId, edit.id, { name: n, planned, category: editCat, edits });
+    console.log("[Plan] edited", { plan: n, changes: history.map((h) => h.field) });
     setEdit(null);
     toast("Plan updated.", "success");
   };
@@ -595,7 +700,10 @@ export default function PlanScreen({ route, navigation }: any) {
         confirmText={pay?.mode === "done" ? "Mark done" : "Record payment"}
         defaultAmount={
           pay
-            ? Math.max(0, (Number(pay.plan.planned) || 0) - (Number(pay.plan.paid) || 0)) || Number(pay.plan.planned) || 0
+            ? // For a part payment, offer what's actually left. Only fall back to
+              // the full amount when nothing has been paid yet (planned may be 0).
+              Math.max(0, (Number(pay.plan.planned) || 0) - (Number(pay.plan.paid) || 0)) ||
+              ((Number(pay.plan.paid) || 0) > 0 ? 0 : Number(pay.plan.planned) || 0)
             : 0
         }
         defaultCategory={pay?.plan.category || "other"}
@@ -705,15 +813,59 @@ export default function PlanScreen({ route, navigation }: any) {
       <Modal visible={!!detail} transparent animationType="fade" onRequestClose={() => setDetail(null)}>
         <Pressable style={styles.backdrop} onPress={() => setDetail(null)}>
           <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
-            {detail && (
-              <PlanDetail
-                p={detail}
-                colors={colors}
-                expenseById={expenseById}
-                onRemove={(idx: number) => removePayment(detail, idx)}
-              />
+            {detailPlan && (
+              <ScrollView style={{ maxHeight: 460 }} showsVerticalScrollIndicator={false}>
+                <PlanDetail
+                  p={detailPlan}
+                  colors={colors}
+                  expenseById={expenseById}
+                  onRemove={(idx: number) => removePayment(detailPlan, idx)}
+                />
+              </ScrollView>
             )}
             <Button title="Close" variant="secondary" onPress={() => setDetail(null)} style={{ marginTop: 12 }} />
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Removing an item that has a real entry in Monthly — keep it or delete it? */}
+      <Modal
+        visible={!!removeAsk}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRemoveAsk(null)}
+      >
+        <Pressable style={styles.backdrop} onPress={() => setRemoveAsk(null)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18, marginBottom: 4 }}>
+              Remove "{removeAsk?.pay?.name || "item"}"?
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 16 }}>
+              {formatMoney(removeAsk?.pay?.amount)} · there's a matching entry in {monthName}.
+            </Text>
+            <Button
+              title="Remove from plan only"
+              variant="secondary"
+              onPress={() => removeAsk && applyRemovePayment(removeAsk.plan, removeAsk.idx, false)}
+            />
+            <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 6, marginBottom: 12 }}>
+              The entry stays in {monthName} and still counts towards your spending.
+            </Text>
+            <Button
+              title="Delete everywhere"
+              variant="danger"
+              onPress={() => removeAsk && applyRemovePayment(removeAsk.plan, removeAsk.idx, true)}
+            />
+            <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 6 }}>
+              Removes it from the plan and deletes the entry from {monthName}. Your totals go back up
+              by {formatMoney(removeAsk?.pay?.amount)}.
+            </Text>
+            <Button
+              title="Cancel"
+              variant="secondary"
+              onPress={() => setRemoveAsk(null)}
+              style={{ marginTop: 14 }}
+            />
           </Pressable>
         </Pressable>
       </Modal>
@@ -765,12 +917,20 @@ function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete
     <Card style={over ? { borderWidth: 1.5, borderColor: colors.danger } : undefined}>
       <Pressable onPress={onDetail}>
         <View style={styles.rowTop}>
+          {/* flex:1 (not just flexShrink) — otherwise a long name next to a wide
+              status chip collapses to nothing and only the emoji is left. */}
           <Text
-            style={{ color: over ? colors.danger : colors.text, fontWeight: "700", fontSize: 16, flexShrink: 1 }}
+            numberOfLines={2}
+            style={{ color: over ? colors.danger : colors.text, fontWeight: "700", fontSize: 16, flex: 1 }}
           >
             {catEmoji(cat)} {p.name}
           </Text>
-          <View style={[styles.chip, { backgroundColor: over ? colors.danger : chip.bg }]}>
+          <View
+            style={[
+              styles.chip,
+              { backgroundColor: over ? colors.danger : chip.bg, flexShrink: 0, marginLeft: 8 },
+            ]}
+          >
             <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>
               {over ? "⚠ Over" : chip.label}
             </Text>
@@ -817,11 +977,15 @@ function MiniBtn({ label, color, onPress }: { label: string; color: string; onPr
 
 function PlanDetail({ p, colors, expenseById, onRemove }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
+  const [allEdits, setAllEdits] = useState(false);
   const planned = Number(p.planned) || 0;
   const paid = Number(p.paid) || 0;
   const actual = Number(p.actual) || 0;
   const isDone = p.status === "done";
   const payments = Array.isArray(p.payments) ? p.payments : [];
+  // Newest change first.
+  const edits: PlanEdit[] = (Array.isArray(p.edits) ? p.edits : []).slice().reverse();
+  const shownEdits = allEdits ? edits : edits.slice(0, 5);
   // Over-budget: figure out which added item(s) pushed the plan over its plan.
   const over = p.status !== "moved" && paid > planned;
   const overBy = paid - planned;
@@ -876,14 +1040,14 @@ function PlanDetail({ p, colors, expenseById, onRemove }: any) {
             const isCulprit = over && Number(pay.amount) > planned;
             return (
               <View key={i} style={[styles.rowTop, { alignItems: "center" }]}>
-                <Text style={{ color: isCulprit ? colors.danger : colors.textMuted, flexShrink: 1 }}>
+                <Text style={{ color: isCulprit ? colors.danger : colors.textMuted, flex: 1 }}>
                   {isCulprit ? "⚠️ " : ""}
                   {nm}{" "}
                   <Text style={{ fontSize: 11 }}>
                     {pay.paidAt ? `· ${formatDateTime(toJsDate(pay.paidAt))}` : ""}
                   </Text>
                 </Text>
-                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <View style={{ flexDirection: "row", alignItems: "center", flexShrink: 0, marginLeft: 8 }}>
                   <Text style={{ color: isCulprit ? colors.danger : colors.text, fontWeight: "600" }}>
                     {formatMoney(pay.amount)}
                   </Text>
@@ -896,6 +1060,40 @@ function PlanDetail({ p, colors, expenseById, onRemove }: any) {
               </View>
             );
           })}
+        </>
+      )}
+
+      {edits.length > 0 && (
+        <>
+          <Text style={{ color: colors.text, fontWeight: "700", marginTop: 12, marginBottom: 4 }}>
+            Edit history
+          </Text>
+          {shownEdits.map((e, i) => (
+            <View key={i} style={[styles.rowTop, { alignItems: "flex-start" }]}>
+              <Text style={{ color: colors.textMuted, flex: 1 }}>
+                {e.field === "planned" ? "Amount" : e.field === "name" ? "Name" : "Category"}{" "}
+                <Text style={{ fontSize: 11 }}>
+                  {e.at ? `· ${formatDateTime(toJsDate(e.at))}` : ""}
+                </Text>
+              </Text>
+              <Text
+                style={{ color: colors.text, fontWeight: "600", flexShrink: 0, marginLeft: 8 }}
+              >
+                {e.field === "planned"
+                  ? `${formatMoney(e.from as number)} → ${formatMoney(e.to as number)}`
+                  : e.field === "category"
+                  ? `${catLabel(String(e.from))} → ${catLabel(String(e.to))}`
+                  : `${e.from} → ${e.to}`}
+              </Text>
+            </View>
+          ))}
+          {edits.length > shownEdits.length && (
+            <Pressable onPress={() => setAllEdits(true)} hitSlop={8} style={{ marginTop: 6 }}>
+              <Text style={{ color: colors.primary, fontWeight: "700", fontSize: 12 }}>
+                Show all {edits.length} changes
+              </Text>
+            </Pressable>
+          )}
         </>
       )}
     </View>

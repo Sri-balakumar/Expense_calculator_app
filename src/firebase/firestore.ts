@@ -559,8 +559,14 @@ export async function movePlans(
         category: p.category || "other",
         status: p.status === "partial" ? "partial" : "pending",
         actual: null,
+        // "whole" carries the payment history across, but each payment's
+        // expenseId refers to a document in the SOURCE month's expenses
+        // subcollection. Kept as-is, deleting or undoing the copy would delete
+        // from the wrong month. Strip the reference and keep the record.
         paid,
-        payments: Array.isArray(p.payments) ? p.payments : [],
+        payments: (Array.isArray(p.payments) ? p.payments : []).map(
+          ({ expenseId, linked, ...rest }) => rest
+        ),
         pushedExpenseId: null,
         transferredFrom: fromMonthName,
         createdAt: serverTimestamp(),

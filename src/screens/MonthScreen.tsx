@@ -39,6 +39,7 @@ import {
   watchPlans,
   addPlan,
   updatePlan,
+  getPlan,
 } from "../firebase/firestore";
 import { formatMoney, currencySymbol } from "../util/money";
 import { exportPdf, exportExcel, attendedWeeks } from "../util/export";
@@ -109,8 +110,13 @@ export default function MonthScreen({ route, navigation }: any) {
   const [assignShowNew, setAssignShowNew] = useState(false);
   const [assignNewName, setAssignNewName] = useState("");
   const assignTotal = assignExps.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  // Expense ids already linked to a plan → don't offer "Assign" for them again.
-  const [linkedExpenseIds, setLinkedExpenseIds] = useState<Set<string>>(new Set());
+  // Expense id → the plan it belongs to. Drives the plan pill on each row and
+  // hides "Assign" for entries already in a plan. Derived live from the plans'
+  // payments[], so it needs no field on the expense doc and can't drift.
+  const [planByExpense, setPlanByExpense] = useState<
+    Map<string, { planId: string; planName: string }>
+  >(new Map());
+  const [assigning, setAssigning] = useState(false); // in-flight guard for doAssign
 
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -169,24 +175,75 @@ export default function MonthScreen({ route, navigation }: any) {
     };
   }, [user, id, type]);
 
-  // Track which expenses are already linked to a plan (to hide "Assign" for them).
+  // Track which plan each expense belongs to (plan pill + hides "Assign").
   useEffect(() => {
     if (!user || type !== "month") {
-      setLinkedExpenseIds(new Set());
+      setPlanByExpense(new Map());
       return;
     }
     const unsub = watchPlans(user.uid, id, (list) => {
-      const ids = new Set<string>();
+      const map = new Map<string, { planId: string; planName: string }>();
       list.forEach((p) => {
+        const link = { planId: p.id, planName: p.name };
         (Array.isArray(p.payments) ? p.payments : []).forEach((pay: any) => {
-          if (pay.expenseId) ids.add(pay.expenseId);
+          if (pay.expenseId) map.set(pay.expenseId, link);
         });
+        // Legacy/PWA data links the expense through this field instead.
+        if (p.pushedExpenseId) map.set(p.pushedExpenseId, link);
       });
-      setLinkedExpenseIds(ids);
-      console.log("[Month] linked-to-plan expense ids", ids.size);
+      setPlanByExpense(map);
+      console.log("[Month] linked-to-plan expense ids", map.size);
     });
     return () => unsub();
   }, [user, id, type]);
+
+  // Keep a plan in step when one of its linked expenses is edited or removed.
+  // `patch === null` means the expense is gone (deleted, or turned into income),
+  // so its payment entry is dropped. Non-fatal — the expense write already landed.
+  const syncPlanForExpense = useCallback(
+    async (
+      expenseId: string,
+      patch: { name: string; amount: number; category?: string; paymentMethod?: string } | null
+    ) => {
+      if (!user || type !== "month") return;
+      const link = planByExpense.get(expenseId);
+      if (!link) return;
+      try {
+        const plan = await getPlan(user.uid, id, link.planId);
+        if (!plan) return;
+        const payments = (Array.isArray(plan.payments) ? plan.payments : []).slice();
+        const idx = payments.findIndex((p: any) => p.expenseId === expenseId);
+        if (idx === -1) return;
+        if (patch) payments[idx] = { ...payments[idx], ...patch };
+        else payments.splice(idx, 1);
+
+        // Recompute from the payments themselves — this also repairs a total
+        // that has already drifted.
+        const paid = payments.reduce((s: number, p: any) => s + (Number(p.amount) || 0), 0);
+        const planned = Number(plan.planned) || 0;
+        const over = paid > planned;
+        const done = !over && planned > 0 && paid >= planned;
+        const updates: any = { payments, paid };
+        // Never re-open a plan the user already closed, and never disturb a moved one.
+        if (plan.status !== "moved") {
+          if (payments.length === 0) {
+            updates.status = "pending";
+            updates.actual = null;
+          } else if (plan.status === "done") {
+            updates.actual = paid; // stays done, figure refreshed
+          } else {
+            updates.status = done ? "done" : "partial";
+            updates.actual = done ? paid : null;
+          }
+        }
+        await updatePlan(user.uid, id, link.planId, updates);
+        console.log("[Month] plan synced after expense change", { plan: link.planName, paid });
+      } catch (e) {
+        console.log("[Month] plan sync failed", e);
+      }
+    },
+    [user, type, id, planByExpense]
+  );
 
   // --- totals ---
   const { spent, income } = useMemo(() => {
@@ -413,6 +470,19 @@ export default function MonthScreen({ route, navigation }: any) {
         // Editing: clear paymentMethod for income.
         if (r.type !== "minus") payload.paymentMethod = null;
         await updateExpense(user.uid, type, id, editTarget.id, payload);
+        // Mirror the change onto the plan this entry belongs to (if any).
+        // Turning a spend into income unlinks it — a plan only tracks spends.
+        await syncPlanForExpense(
+          editTarget.id,
+          r.type === "minus"
+            ? {
+                name: r.name,
+                amount: r.amount,
+                category: r.category,
+                paymentMethod: r.paymentMethod,
+              }
+            : null
+        );
         toast("Entry updated", "success");
       } else {
         await addExpense(user.uid, type, id, payload);
@@ -426,13 +496,17 @@ export default function MonthScreen({ route, navigation }: any) {
 
   const onDelete = async (exp: Expense) => {
     if (!user) return;
+    const link = planByExpense.get(exp.id);
     const ok = await confirm({
       title: "Delete this entry?",
-      message: `"${exp.name}" — ${formatMoney(exp.amount)}`,
+      message:
+        `"${exp.name}" — ${formatMoney(exp.amount)}` +
+        (link ? `\n\nIt will also be removed from the plan "${link.planName}".` : ""),
       confirmText: "Delete",
     });
     if (!ok) return;
     await deleteExpense(user.uid, type, id, exp.id);
+    await syncPlanForExpense(exp.id, null);
     toast("Deleted", "success");
   };
 
@@ -445,7 +519,11 @@ export default function MonthScreen({ route, navigation }: any) {
     setAssignNewName("");
     setAssignExps(exps);
     try {
-      const ps = await getPlans(user.uid, id);
+      // A moved plan lives in its target month now, and a done plan is closed —
+      // assigning into either would make one obligation pending in two months.
+      const ps = (await getPlans(user.uid, id)).filter(
+        (p) => p.status !== "moved" && p.status !== "done"
+      );
       setAssignPlans(ps);
       console.log("[Month] assign: loaded plans", ps.length, "for", exps.length, "entries");
     } catch (e) {
@@ -458,7 +536,7 @@ export default function MonthScreen({ route, navigation }: any) {
   const assignSelection = () => {
     const sel = expenses.filter((e) => selected.has(e.id));
     const hasIncome = sel.some((e) => e.type === "plus");
-    const exps = sel.filter((e) => e.type === "minus" && !linkedExpenseIds.has(e.id));
+    const exps = sel.filter((e) => e.type === "minus" && !planByExpense.has(e.id));
     if (exps.length === 0) {
       if (hasIncome) return toast("Only spends can be added to plans.", "error");
       return toast("Select spend entries that aren't already in a plan.", "error");
@@ -468,50 +546,95 @@ export default function MonthScreen({ route, navigation }: any) {
   };
 
   const doAssign = async () => {
-    if (!user || assignExps.length === 0) return;
-    let plan = assignPlanId ? assignPlans.find((p) => p.id === assignPlanId) : null;
-    if (!plan) {
-      // Create a new plan sized to the selected total, then link into it.
-      const pn = assignNewName.trim() || assignExps[0].name;
-      const pid = await addPlan(user.uid, id, {
-        name: pn,
-        planned: assignTotal,
-        category: assignExps[0].category || "other",
-        status: "pending",
-        actual: null,
-        paid: 0,
-        payments: [],
-        pushedExpenseId: null,
+    if (!user || assignExps.length === 0 || assigning) return;
+    setAssigning(true);
+    try {
+      // The picker's snapshot can be stale, so membership is checked against a
+      // fresh read of every plan rather than against the UI's state.
+      const current = await getPlans(user.uid, id);
+      const owner = new Map<string, string>();
+      current.forEach((p) => {
+        (Array.isArray(p.payments) ? p.payments : []).forEach((pay: any) => {
+          if (pay.expenseId) owner.set(pay.expenseId, p.name);
+        });
+        if (p.pushedExpenseId) owner.set(p.pushedExpenseId, p.name);
+      });
+      const taken = assignExps.find((e) => owner.has(e.id));
+      if (taken) {
+        toast(`"${taken.name}" is already in "${owner.get(taken.id)}".`, "error");
+        setAssignExps([]);
+        return;
+      }
+
+      let planId = assignPlanId;
+      if (!planId) {
+        // Create a new plan sized to the selected total, then link into it.
+        const pn = assignNewName.trim() || assignExps[0].name;
+        planId = await addPlan(user.uid, id, {
+          name: pn,
+          planned: assignTotal,
+          category: assignExps[0].category || "other",
+          status: "pending",
+          actual: null,
+          paid: 0,
+          payments: [],
+          pushedExpenseId: null,
+        } as any);
+        console.log("[Month] assign: created plan", { pid: planId, pn });
+      }
+
+      // Re-read so a payment recorded since the modal opened isn't clobbered.
+      const plan = planId === assignPlanId ? current.find((p) => p.id === planId) : await getPlan(user.uid, id, planId);
+      if (!plan) {
+        toast("That plan no longer exists.", "error");
+        setAssignExps([]);
+        return;
+      }
+      if (plan.status === "moved" || plan.status === "done") {
+        toast(`"${plan.name}" is ${plan.status} — pick another plan.`, "error");
+        setAssignExps([]);
+        return;
+      }
+
+      // Append every selected expense as a linked payment (stays in Monthly).
+      const payments = (Array.isArray(plan.payments) ? plan.payments : []).slice();
+      for (const exp of assignExps) {
+        payments.push({
+          name: exp.name,
+          amount: Number(exp.amount) || 0,
+          expenseId: exp.id,
+          category: exp.category,
+          paymentMethod: exp.paymentMethod,
+          linked: true,
+          paidAt: toJsDate(exp.createdAt) || new Date(),
+        } as any);
+      }
+      const newPaid = payments.reduce((s: number, p: any) => s + (Number(p.amount) || 0), 0);
+      const planned = Number(plan.planned) || 0;
+      const over = newPaid > planned; // don't mark done when it overflows the plan
+      const done = !over && planned > 0 && newPaid >= planned;
+      await updatePlan(user.uid, id, plan.id, {
+        payments,
+        paid: newPaid,
+        status: done ? "done" : "partial",
+        actual: done ? newPaid : null,
       } as any);
-      plan = { id: pid, name: pn, planned: assignTotal, paid: 0, payments: [], status: "pending" } as any;
-      console.log("[Month] assign: created plan", { pid, pn });
+      console.log("[Month] assigned to plan", {
+        plan: plan.name,
+        count: assignExps.length,
+        newPaid,
+      });
+      setAssignExps([]);
+      toast(
+        `${assignExps.length > 1 ? assignExps.length + " entries" : "Assigned"} → "${plan.name}"`,
+        "success"
+      );
+    } catch (e) {
+      console.log("[Month] assign failed", e);
+      toast("Couldn't assign. Try again.", "error");
+    } finally {
+      setAssigning(false);
     }
-    // Append every selected expense as a linked payment (stays in Monthly).
-    const payments = Array.isArray(plan!.payments) ? plan!.payments.slice() : [];
-    for (const exp of assignExps) {
-      payments.push({
-        name: exp.name,
-        amount: exp.amount,
-        expenseId: exp.id,
-        category: exp.category,
-        paymentMethod: exp.paymentMethod,
-        linked: true,
-        paidAt: toJsDate(exp.createdAt) || new Date(),
-      } as any);
-    }
-    const newPaid = (Number(plan!.paid) || 0) + assignTotal;
-    const planned = Number(plan!.planned) || 0;
-    const over = newPaid > planned; // don't mark done when it overflows the plan
-    const done = !over && newPaid >= planned;
-    await updatePlan(user.uid, id, plan!.id, {
-      payments,
-      paid: newPaid,
-      status: done ? "done" : "partial",
-      actual: done ? newPaid : null,
-    } as any);
-    console.log("[Month] assigned to plan", { plan: plan!.name, count: assignExps.length, newPaid });
-    setAssignExps([]);
-    toast(`${assignExps.length > 1 ? assignExps.length + " entries" : "Assigned"} → "${plan!.name}"`, "success");
   };
 
   const onEditBalance = async () => {
@@ -587,12 +710,19 @@ export default function MonthScreen({ route, navigation }: any) {
 
   const deleteSelection = async () => {
     if (!user) return;
+    const inPlans = [...selected].filter((eid) => planByExpense.has(eid)).length;
     const ok = await confirm({
       title: `Delete ${selected.size} entr${selected.size > 1 ? "ies" : "y"}?`,
+      message: inPlans
+        ? `${inPlans} of them ${inPlans > 1 ? "are" : "is"} in a plan and will be removed from it too.`
+        : undefined,
       confirmText: "Delete",
     });
     if (!ok) return;
-    for (const eid of selected) await deleteExpense(user.uid, type, id, eid);
+    for (const eid of selected) {
+      await deleteExpense(user.uid, type, id, eid);
+      await syncPlanForExpense(eid, null);
+    }
     toast("Deleted", "success");
     exitSelect();
   };
@@ -992,6 +1122,7 @@ export default function MonthScreen({ route, navigation }: any) {
                     <ExpenseRow
                       key={exp.id}
                       exp={exp}
+                      plan={planByExpense.get(exp.id)}
                       colors={colors}
                       selectMode={selectMode}
                       selected={selected.has(exp.id)}
@@ -1175,11 +1306,12 @@ export default function MonthScreen({ route, navigation }: any) {
 
       <DetailsModal
         exp={details}
+        plan={details ? planByExpense.get(details.id) : undefined}
         type={type}
         colors={colors}
         onClose={() => setDetails(null)}
         onAssign={
-          type === "month" && details && !linkedExpenseIds.has(details.id)
+          type === "month" && details && !planByExpense.has(details.id)
             ? (exp: Expense) => openAssign([exp])
             : undefined
         }
@@ -1309,6 +1441,7 @@ export default function MonthScreen({ route, navigation }: any) {
               <Button
                 title={assignPlanId ? "Assign" : "Create & assign"}
                 onPress={doAssign}
+                loading={assigning}
                 style={{ flex: 1 }}
               />
             </View>
@@ -1398,6 +1531,7 @@ function BarBtn({ label, color, onPress }: { label: string; color: string; onPre
 
 function ExpenseRow({
   exp,
+  plan,
   colors,
   selectMode,
   selected,
@@ -1428,6 +1562,17 @@ function ExpenseRow({
       )}
       <View style={{ flex: 1 }}>
         <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>{exp.name}</Text>
+        {!!plan && (
+          <View style={[styles.planChip, { backgroundColor: colors.chipBg }]}>
+            <Ionicons name="albums-outline" size={11} color={colors.primary} />
+            <Text
+              style={{ color: colors.primary, fontSize: 11, fontWeight: "700" }}
+              numberOfLines={1}
+            >
+              {plan.planName}
+            </Text>
+          </View>
+        )}
         <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>
           {catEmoji(cat)} {catLabel(cat)}
           {exp.type === "minus" && exp.paymentMethod
@@ -1464,7 +1609,7 @@ function ExpenseRow({
   );
 }
 
-function DetailsModal({ exp, type, colors, onClose, onAssign }: any) {
+function DetailsModal({ exp, plan, type, colors, onClose, onAssign }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
   const { label: pmLabel, emoji: pmEmoji } = usePaymentMethods();
   if (!exp) return null;
@@ -1480,6 +1625,7 @@ function DetailsModal({ exp, type, colors, onClose, onAssign }: any) {
       "Payment",
       exp.paymentMethod ? `${pmEmoji(exp.paymentMethod)} ${pmLabel(exp.paymentMethod)}` : "—",
     ]);
+  if (plan) rows.push(["Plan", plan.planName]);
   if (type !== "budget" && d) rows.push(["Week", `Week ${weekOfMonth(d)}`]);
   rows.push(["Date", formatDateTime(d)]);
   if (exp.notes) rows.push(["Notes", exp.notes]);
@@ -1593,6 +1739,17 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   weekDivider: { fontWeight: "700", fontSize: 12, marginTop: 6, marginBottom: 4, marginLeft: 4 },
+  // Pill under an expense name showing the plan it belongs to.
+  planChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 7,
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import * as Font from "expo-font";
+import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { NavigationContainer } from "@react-navigation/native";
@@ -12,6 +13,18 @@ import { PinProvider } from "./src/context/PinContext";
 import { CurrencyProvider } from "./src/context/CurrencyContext";
 import RootNavigator from "./src/navigation/RootNavigator";
 import { FONT_ASSETS, applyGlobalFont } from "./src/theme/fonts";
+
+// Hold the native splash until the in-app splash has painted. Without this it
+// auto-hides the moment the bundle mounts — which is a `null` render (fonts,
+// theme and currency all gate on storage reads) — showing a white flash before
+// the real splash. RootNavigator's <Splash /> calls hideAsync() on layout.
+SplashScreen.preventAutoHideAsync().catch(() => {});
+SplashScreen.setOptions({ duration: 300, fade: true });
+
+// Failsafe: never leave the native splash stuck up if boot fails early.
+setTimeout(() => {
+  SplashScreen.hideAsync().catch(() => {});
+}, 8000);
 
 // Patch Text/TextInput to render in Inter app-wide (before any render).
 applyGlobalFont();

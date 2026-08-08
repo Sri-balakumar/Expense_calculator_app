@@ -17,6 +17,8 @@ import { useFeedback } from "../components/Feedback";
 import { Card, Button, MoneyInput } from "../components/UI";
 import Watermark from "../components/Watermark";
 import ScreenHeader from "../components/ScreenHeader";
+import HelpFab from "../components/HelpFab";
+import { HELP_BUDGETS, HELP_GOALS } from "../constants/help";
 import { fetchBudgetsData, createBudget, watchGoals, createGoal } from "../firebase/firestore";
 import { formatMoney, amountToWords, currencySymbol } from "../util/money";
 import { BudgetDoc, GoalDoc } from "../types";
@@ -115,7 +117,7 @@ export default function BudgetsScreen({ navigation }: any) {
         subtitle="Fixed spending pots, and savings goals you build up."
       />
       <ScrollView
-        contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 120 }}
+        contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 170 }}
         refreshControl={<RefreshControl refreshing={false} onRefresh={load} />}
       >
         {/* Segmented: Goals | Budgets */}
@@ -250,6 +252,9 @@ export default function BudgetsScreen({ navigation }: any) {
           </>
         )}
       </ScrollView>
+
+      {/* Explains whichever segment is currently showing. */}
+      <HelpFab {...(tab === "goals" ? HELP_GOALS : HELP_BUDGETS)} />
 
       {/* New goal form */}
       <Modal visible={goalModal} transparent animationType="fade" onRequestClose={() => setGoalModal(false)}>

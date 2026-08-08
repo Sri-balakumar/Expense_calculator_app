@@ -24,6 +24,8 @@ import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
 import { Button, Card, Field, MoneyInput } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
+import HelpFab from "../components/HelpFab";
+import { HELP_PROFILE } from "../constants/help";
 import SelectField from "../components/SelectField";
 import { signOutUser, updateUserProfile, changePassword, friendlyAuthError } from "../firebase/auth";
 import {
@@ -505,7 +507,7 @@ export default function ProfileScreen() {
       <ScreenHeader title="Profile" subtitle={user?.email || undefined} />
       <ScrollView
         style={{ flex: 1, backgroundColor: "transparent" }}
-        contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 120 }}
+        contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 170 }}
         keyboardShouldPersistTaps="handled"
       >
       {/* Personal info */}
@@ -1019,6 +1021,7 @@ export default function ProfileScreen() {
         </Pressable>
       </Modal>
       </ScrollView>
+      <HelpFab {...HELP_PROFILE} />
     </View>
   );
 }

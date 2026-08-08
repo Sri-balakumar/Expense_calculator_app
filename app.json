@@ -29,16 +29,22 @@
         "expo-splash-screen",
         {
           "image": "./assets/splash-icon.png",
-          "imageWidth": 280,
+          "imageWidth": 220,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#2e294e",
           "dark": {
             "image": "./assets/splash-icon.png",
-            "backgroundColor": "#ffffff"
+            "backgroundColor": "#2e294e"
           }
         }
       ],
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "c608b6db-f149-499b-a533-59e73bb4c1ab"
+      }
+    },
+    "owner": "gegefe9645"
   }
 }

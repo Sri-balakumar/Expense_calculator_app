@@ -15,6 +15,8 @@ import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "../components/UI";
 import ScreenHeader from "../components/ScreenHeader";
+import HelpFab from "../components/HelpFab";
+import { HELP_YEAR } from "../constants/help";
 import { fetchYearData, YearData } from "../firebase/firestore";
 import { formatMoney } from "../util/money";
 
@@ -72,7 +74,7 @@ export default function YearScreen({ navigation }: any) {
           </Pressable>
         </View>
       </ScreenHeader>
-      <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 120 }}>
+      <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 16, paddingBottom: 170 }}>
 
         {loading ? (
           <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
@@ -136,6 +138,7 @@ export default function YearScreen({ navigation }: any) {
           </>
         )}
       </ScrollView>
+      <HelpFab {...HELP_YEAR} />
     </View>
   );
 }
