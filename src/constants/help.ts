@@ -10,6 +10,7 @@ export const HELP_MONTHLY: HelpContent = {
     "This is your home base. Every month you track lives here as its own card, showing what you spent, what came in, and what's left.",
     "Tap “New / open month” to start a month. You enter the balance you're beginning with, and the app can carry over whatever was left from your last month automatically.",
     "Open a month to add your spends and income one by one. The card here keeps a running summary, plus a few insights — your biggest spending category, and how much of your salary the month has used up.",
+    "Inside a month, every entry also shows the total left right after it — so you can scroll back and watch how the money actually drained away.",
   ],
   example:
     "You start August with ₹20,000 in hand. Over the month you add spends totalling ₹14,500 and a ₹2,000 freelance payment. The August card shows ₹14,500 spent and ₹7,500 left. When you create September, the app offers to carry that ₹7,500 across as your opening balance.",
@@ -21,6 +22,7 @@ export const HELP_PLANS: HelpContent = {
     "Plans are spends you know are coming but haven't made yet — rent, a phone bill, a gift. They let you see what your month really looks like once the money you've already committed is accounted for.",
     "Pick a month, then add a plan with a name and an amount. Your month then shows “after plans” — what's genuinely free to spend, not just what's sitting in your account today.",
     "When you actually pay, tap Done or Part. A part payment records a real entry in Monthly for you, so you never type it twice. You can also work the other way: tap an existing entry in Monthly and assign it to a plan.",
+    "A plan closes itself once it's fully covered — you don't have to mark it done. If it turns out to cost more, tap “+ Add” to raise the amount and the plan re-opens with the difference still to pay.",
     "Not paying it this month? Move the plan to the next one and it carries across instead of quietly disappearing.",
   ],
   example:

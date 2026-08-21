@@ -42,6 +42,7 @@ import {
   getPlan,
 } from "../firebase/firestore";
 import { formatMoney, currencySymbol } from "../util/money";
+import { derivePlanStatus } from "../util/plan";
 import { exportPdf, exportExcel, attendedWeeks } from "../util/export";
 import {
   toJsDate,
@@ -218,25 +219,11 @@ export default function MonthScreen({ route, navigation }: any) {
         else payments.splice(idx, 1);
 
         // Recompute from the payments themselves — this also repairs a total
-        // that has already drifted.
+        // that has already drifted. Editing a linked entry down re-opens a plan
+        // that's no longer covered; editing it back up closes it again.
         const paid = payments.reduce((s: number, p: any) => s + (Number(p.amount) || 0), 0);
-        const planned = Number(plan.planned) || 0;
-        const over = paid > planned;
-        const done = !over && planned > 0 && paid >= planned;
-        const updates: any = { payments, paid };
-        // Never re-open a plan the user already closed, and never disturb a moved one.
-        if (plan.status !== "moved") {
-          if (payments.length === 0) {
-            updates.status = "pending";
-            updates.actual = null;
-          } else if (plan.status === "done") {
-            updates.actual = paid; // stays done, figure refreshed
-          } else {
-            updates.status = done ? "done" : "partial";
-            updates.actual = done ? paid : null;
-          }
-        }
-        await updatePlan(user.uid, id, link.planId, updates);
+        const st = derivePlanStatus(plan, Number(plan.planned) || 0, paid, payments);
+        await updatePlan(user.uid, id, link.planId, { payments, paid, ...(st || {}) } as any);
         console.log("[Month] plan synced after expense change", { plan: link.planName, paid });
       } catch (e) {
         console.log("[Month] plan sync failed", e);
@@ -258,6 +245,22 @@ export default function MonthScreen({ route, navigation }: any) {
   }, [expenses]);
 
   const totalRemaining = (isBudget ? limit : currentBalance) - spent + income;
+
+  // Balance immediately after each entry, keyed by expense id — makes the list
+  // read like a statement. Walks oldest → newest so the newest row lands exactly
+  // on `totalRemaining`. Always derived from *all* entries, never the filtered
+  // subset, so a filtered view still shows the true balance at that moment.
+  const balanceAfter = useMemo(() => {
+    const map = new Map<string, number>();
+    let bal = isBudget ? limit : currentBalance;
+    for (let i = expenses.length - 1; i >= 0; i--) {
+      const e = expenses[i];
+      const amt = Number(e.amount) || 0;
+      bal += e.type === "plus" ? amt : -amt;
+      map.set(e.id, bal);
+    }
+    return map;
+  }, [expenses, isBudget, limit, currentBalance]);
   // Global savings pot from Profile — shown as a combined figure, not spent from.
   const mainBalance = Number(profile?.mainBalance) || 0;
 
@@ -610,14 +613,11 @@ export default function MonthScreen({ route, navigation }: any) {
         } as any);
       }
       const newPaid = payments.reduce((s: number, p: any) => s + (Number(p.amount) || 0), 0);
-      const planned = Number(plan.planned) || 0;
-      const over = newPaid > planned; // don't mark done when it overflows the plan
-      const done = !over && planned > 0 && newPaid >= planned;
+      const st = derivePlanStatus(plan, Number(plan.planned) || 0, newPaid, payments);
       await updatePlan(user.uid, id, plan.id, {
         payments,
         paid: newPaid,
-        status: done ? "done" : "partial",
-        actual: done ? newPaid : null,
+        ...(st || {}),
       } as any);
       console.log("[Month] assigned to plan", {
         plan: plan.name,
@@ -1123,6 +1123,7 @@ export default function MonthScreen({ route, navigation }: any) {
                       key={exp.id}
                       exp={exp}
                       plan={planByExpense.get(exp.id)}
+                      balanceAfter={balanceAfter.get(exp.id)}
                       colors={colors}
                       selectMode={selectMode}
                       selected={selected.has(exp.id)}
@@ -1307,6 +1308,7 @@ export default function MonthScreen({ route, navigation }: any) {
       <DetailsModal
         exp={details}
         plan={details ? planByExpense.get(details.id) : undefined}
+        balanceAfter={details ? balanceAfter.get(details.id) : undefined}
         type={type}
         colors={colors}
         onClose={() => setDetails(null)}
@@ -1512,6 +1514,13 @@ export default function MonthScreen({ route, navigation }: any) {
 }
 
 // ---- subcomponents ----
+// "₹7,500", or "− ₹500" once the balance has gone under. formatMoney puts the
+// symbol before the sign ("₹-500"), so negatives get an explicit dash instead —
+// same treatment as the total card at the top of the screen.
+function signedMoney(v: number): string {
+  return (v < 0 ? "− " : "") + formatMoney(Math.abs(v));
+}
+
 function BreakItem({ label, value, colors }: { label: string; value: string; colors: any }) {
   return (
     <View style={{ alignItems: "center" }}>
@@ -1532,6 +1541,7 @@ function BarBtn({ label, color, onPress }: { label: string; color: string; onPre
 function ExpenseRow({
   exp,
   plan,
+  balanceAfter,
   colors,
   selectMode,
   selected,
@@ -1584,6 +1594,17 @@ function ExpenseRow({
             📝 {exp.notes}
           </Text>
         )}
+        {balanceAfter !== undefined && (
+          <Text
+            style={{
+              color: balanceAfter < 0 ? colors.danger : colors.textMuted,
+              fontSize: 12,
+              marginTop: 2,
+            }}
+          >
+            Total after: {signedMoney(balanceAfter)}
+          </Text>
+        )}
       </View>
       <Text
         style={{
@@ -1609,7 +1630,7 @@ function ExpenseRow({
   );
 }
 
-function DetailsModal({ exp, plan, type, colors, onClose, onAssign }: any) {
+function DetailsModal({ exp, plan, balanceAfter, type, colors, onClose, onAssign }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
   const { label: pmLabel, emoji: pmEmoji } = usePaymentMethods();
   if (!exp) return null;
@@ -1618,8 +1639,9 @@ function DetailsModal({ exp, plan, type, colors, onClose, onAssign }: any) {
   const rows: [string, string][] = [
     ["Type", exp.type === "plus" ? "+ Income" : "− Spend"],
     ["Amount", formatMoney(exp.amount)],
-    ["Category", `${catEmoji(cat)} ${catLabel(cat)}`],
   ];
+  if (balanceAfter !== undefined) rows.push(["Total after", signedMoney(balanceAfter)]);
+  rows.push(["Category", `${catEmoji(cat)} ${catLabel(cat)}`]);
   if (exp.type === "minus")
     rows.push([
       "Payment",

@@ -32,6 +32,7 @@ import {
   GoalDoc,
   GoalEntry,
 } from "../types";
+import { derivePlanStatus } from "../util/plan";
 
 // ---- path helpers -----------------------------------------------------------
 const userRef = (uid: string) => doc(db, "users", uid);
@@ -551,22 +552,27 @@ export async function movePlans(
     const planned = Number(p.planned) || 0;
     const paid = Number(p.paid) || 0;
     const remaining = Math.max(0, planned - paid);
+    // "whole" carries the payment history across, but each payment's expenseId
+    // refers to a document in the SOURCE month's expenses subcollection. Kept
+    // as-is, deleting or undoing the copy would delete from the wrong month —
+    // so the reference is stripped and only the record kept.
+    const copiedPays = (Array.isArray(p.payments) ? p.payments : []).map(
+      ({ expenseId, linked, ...rest }) => rest
+    );
     if (mode === "whole") {
       const newRef = doc(target);
       batch.set(newRef, {
         name: p.name,
         planned,
         category: p.category || "other",
-        status: p.status === "partial" ? "partial" : "pending",
-        actual: null,
-        // "whole" carries the payment history across, but each payment's
-        // expenseId refers to a document in the SOURCE month's expenses
-        // subcollection. Kept as-is, deleting or undoing the copy would delete
-        // from the wrong month. Strip the reference and keep the record.
+        // The copy carries `paid` across, so it starts wherever those figures
+        // put it — a fully-covered plan lands as done, not partial.
+        ...(derivePlanStatus({ status: "pending" }, planned, paid, copiedPays) || {
+          status: "pending" as const,
+          actual: null,
+        }),
         paid,
-        payments: (Array.isArray(p.payments) ? p.payments : []).map(
-          ({ expenseId, linked, ...rest }) => rest
-        ),
+        payments: copiedPays,
         pushedExpenseId: null,
         transferredFrom: fromMonthName,
         createdAt: serverTimestamp(),

@@ -41,6 +41,7 @@ import {
   formatDateMedium,
 } from "../util/date";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
+import { derivePlanStatus } from "../util/plan";
 import { PlanDoc, PlanEdit, Expense, MonthDoc } from "../types";
 
 export default function PlanScreen({ route, navigation }: any) {
@@ -74,6 +75,9 @@ export default function PlanScreen({ route, navigation }: any) {
   const [editAmount, setEditAmount] = useState("");
   const [editCat, setEditCat] = useState("other");
   const [move, setMove] = useState<PlanDoc[] | null>(null);
+  // "+ Add" — raises a plan's planned amount (never records a payment).
+  const [topUp, setTopUp] = useState<PlanDoc | null>(null);
+  const [topUpAmount, setTopUpAmount] = useState("");
   const [detail, setDetail] = useState<PlanDoc | null>(null);
   // Which item the user is removing, while we ask what to do with its entry.
   const [removeAsk, setRemoveAsk] = useState<{ plan: PlanDoc; idx: number; pay: any } | null>(null);
@@ -82,6 +86,7 @@ export default function PlanScreen({ route, navigation }: any) {
   // `detail` is only a handle on WHICH plan is open — always read the live doc
   // from the snapshot so the popup reflects edits and payments as they happen.
   const detailPlan = detail ? plans.find((x) => x.id === detail.id) || detail : null;
+  const topUpPlan = topUp ? plans.find((x) => x.id === topUp.id) || topUp : null;
 
   // Calendar marks: each plan's date is a planned spend (red dot).
   const planDayKey = (p: PlanDoc) =>
@@ -237,7 +242,13 @@ export default function PlanScreen({ route, navigation }: any) {
       danger: false,
     });
     if (!ok) return;
-    await updatePlan(user.uid, monthId, p.id, { status: "done", actual: paid });
+    // Closed short of the planned amount on purpose — flagged so a later money
+    // change doesn't quietly re-open it.
+    await updatePlan(user.uid, monthId, p.id, {
+      status: "done",
+      actual: paid,
+      closedEarly: paid < planned,
+    });
     toast(`${p.name} closed`, "success");
   };
 
@@ -257,6 +268,9 @@ export default function PlanScreen({ route, navigation }: any) {
         actual: r.amount,
         category: r.category,
         pushedExpenseId: null,
+        // Marking done records an outcome without any payment behind it, so the
+        // numbers alone would say "pending" — keep re-derivation off this plan.
+        closedEarly: (Number(p.paid) || 0) < (Number(p.planned) || 0),
       });
       toast(`${p.name} done`, "success");
       return;
@@ -299,15 +313,13 @@ export default function PlanScreen({ route, navigation }: any) {
         paidAt: inputValueToDate(r.dateValue),
       });
       const newPaid = (Number(p.paid) || 0) + r.amount;
-      const planned = Number(p.planned) || 0;
-      // Once it's fully paid the plan is done — otherwise its "Part" button stays
-      // live and the next tap records the whole amount a second time.
-      const done = planned > 0 && newPaid >= planned;
+      // Once it's fully paid the plan closes itself — otherwise its "Part" button
+      // stays live and the next tap records the whole amount a second time.
+      const st = derivePlanStatus(p, Number(p.planned) || 0, newPaid, payments);
       await updatePlan(user.uid, monthId, p.id, {
         paid: newPaid,
         payments,
-        status: done ? "done" : "partial",
-        actual: done ? newPaid : null,
+        ...(st || {}),
       });
       const left = Math.max(0, (Number(p.planned) || 0) - newPaid);
       toast(`${formatMoney(r.amount)} paid · ${formatMoney(left)} left`, "success");
@@ -317,13 +329,20 @@ export default function PlanScreen({ route, navigation }: any) {
   // ---- undo / delete ----
   const onUndo = async (p: PlanDoc) => {
     if (!user) return;
+    // Re-opening by hand also drops the "closed early" flag, so from here on the
+    // plan's status follows its numbers again.
     if (Array.isArray(p.payments) && p.payments.length) {
-      await updatePlan(user.uid, monthId, p.id, { status: "partial", actual: null });
+      await updatePlan(user.uid, monthId, p.id, { status: "partial", actual: null, closedEarly: false });
       toast("Reopened — part payments kept.", "success");
       return;
     }
     if (p.pushedExpenseId) await deleteExpense(user.uid, "month", monthId, p.pushedExpenseId).catch(() => {});
-    await updatePlan(user.uid, monthId, p.id, { status: "pending", actual: null, pushedExpenseId: null });
+    await updatePlan(user.uid, monthId, p.id, {
+      status: "pending",
+      actual: null,
+      pushedExpenseId: null,
+      closedEarly: false,
+    });
     toast("Plan reopened.", "success");
   };
 
@@ -441,17 +460,10 @@ export default function PlanScreen({ route, navigation }: any) {
       await deleteExpense(user.uid, "month", monthId, removed.expenseId).catch(() => {});
     }
     const newPaid = Math.max(0, (Number(plan.paid) || 0) - (Number(removed.amount) || 0));
-    // A moved plan keeps its status and its record of what was spent here —
-    // recomputing would resurrect it in this month while the copy still exists.
-    const isMovedPlan = plan.status === "moved";
-    const status = isMovedPlan
-      ? plan.status
-      : payments.length === 0 && newPaid <= 0
-      ? "pending"
-      : "partial";
-    const updates: any = { payments, paid: newPaid, status };
-    if (!isMovedPlan) updates.actual = null;
-    await updatePlan(user.uid, monthId, plan.id, updates);
+    // derivePlanStatus leaves a moved plan alone: it keeps its status and its
+    // record of what was spent here, since the live copy is in another month.
+    const st = derivePlanStatus(plan, Number(plan.planned) || 0, newPaid, payments);
+    await updatePlan(user.uid, monthId, plan.id, { payments, paid: newPaid, ...(st || {}) } as any);
     console.log("[Plan] removed item from plan", {
       plan: plan.name,
       item: removed.name,
@@ -508,10 +520,89 @@ export default function PlanScreen({ route, navigation }: any) {
     }
 
     const edits = [...(Array.isArray(edit.edits) ? edit.edits : []), ...history];
-    await updatePlan(user.uid, monthId, edit.id, { name: n, planned, category: editCat, edits });
+    const updates: any = { name: n, planned, category: editCat, edits };
+    // Changing the target re-opens the question of whether this plan is finished,
+    // so the status follows the new figure — raising a done plan above what's
+    // been paid puts it back to partial. A hand-closed plan is fair game here:
+    // deliberately changing its amount is deliberately re-opening it.
+    if (oldPlanned !== planned) {
+      const st = derivePlanStatus(
+        { status: edit.status, closedEarly: false },
+        planned,
+        paid,
+        Array.isArray(edit.payments) ? edit.payments : []
+      );
+      if (st) Object.assign(updates, st, { closedEarly: false });
+    }
+    await updatePlan(user.uid, monthId, edit.id, updates);
     console.log("[Plan] edited", { plan: n, changes: history.map((h) => h.field) });
     setEdit(null);
     toast("Plan updated.", "success");
+  };
+
+  // ---- top up (the "+ Add" button) ----
+  // Raises the plan's target. It records no payment and writes nothing into
+  // Monthly — a ₹100 plan topped up by ₹100 becomes a ₹200 plan that's half paid.
+  const topUpAmt = Number(topUpAmount) || 0;
+  const topUpOld = Number(topUpPlan?.planned) || 0;
+  const topUpPaid = Number(topUpPlan?.paid) || 0;
+  const topUpNew = topUpOld + topUpAmt;
+  // "After plans" once the extra is committed: the unpaid part of this plan grows
+  // by the top-up, unless the plan was closed (contributing nothing) and re-opens.
+  const topUpAfter = useMemo(() => {
+    if (!topUpPlan) return afterPlans;
+    const wasPending =
+      topUpPlan.status === "pending"
+        ? topUpOld
+        : topUpPlan.status === "partial"
+        ? Math.max(0, topUpOld - topUpPaid)
+        : 0;
+    const nowPending = Math.max(0, topUpNew - topUpPaid);
+    return remaining - (pending - wasPending + nowPending);
+  }, [topUpPlan, topUpOld, topUpPaid, topUpNew, pending, remaining, afterPlans]);
+
+  const openTopUp = (p: PlanDoc) => {
+    setTopUpAmount("");
+    setTopUp(p);
+  };
+
+  const submitTopUp = async () => {
+    if (!user || !topUpPlan) return;
+    const p = topUpPlan;
+    const amt = Number(topUpAmount);
+    if (!topUpAmount.trim() || isNaN(amt) || amt <= 0) return toast("Enter a valid amount.", "error");
+    const oldPlanned = Number(p.planned) || 0;
+    const newPlanned = oldPlanned + amt;
+    if (topUpAfter < 0) {
+      const ok = await confirm({
+        title: "Plans exceed balance",
+        message: `Adding this makes pending plans ${formatMoney(-topUpAfter)} more than your balance (${formatMoney(remaining)}). Add anyway?`,
+        confirmText: "Add anyway",
+      });
+      if (!ok) return;
+    }
+    setTopUp(null);
+    // Logged as a normal "planned" edit so the detail popup's Edit history
+    // explains why the plan says 200 when the entries under it add up to 100.
+    const edits = [
+      ...(Array.isArray(p.edits) ? p.edits : []),
+      { at: new Date(), field: "planned", from: oldPlanned, to: newPlanned } as PlanEdit,
+    ];
+    const paid = Number(p.paid) || 0;
+    const st = derivePlanStatus(
+      { status: p.status, closedEarly: false },
+      newPlanned,
+      paid,
+      Array.isArray(p.payments) ? p.payments : []
+    );
+    await updatePlan(user.uid, monthId, p.id, {
+      planned: newPlanned,
+      edits,
+      closedEarly: false,
+      ...(st || {}),
+    } as any);
+    console.log("[Plan] topped up", { plan: p.name, from: oldPlanned, to: newPlanned, paid });
+    toast(`${p.name} is now ${formatMoney(newPlanned)}`, "success");
   };
 
   // ---- move ----
@@ -676,6 +767,7 @@ export default function PlanScreen({ route, navigation }: any) {
               p={p}
               colors={colors}
               onDetail={() => setDetail(p)}
+              onTopUp={() => openTopUp(p)}
               onDone={() => openDone(p)}
               onPart={() => setPay({ plan: p, mode: "part" })}
               onMove={() => openMove(p)}
@@ -763,6 +855,73 @@ export default function PlanScreen({ route, navigation }: any) {
             <View style={styles.actions}>
               <Button title="Cancel" variant="secondary" onPress={() => setEdit(null)} style={{ flex: 1 }} />
               <Button title="Save" onPress={submitEdit} style={{ flex: 1 }} />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Top up — raise the planned amount */}
+      <Modal visible={!!topUp} transparent animationType="fade" onRequestClose={() => setTopUp(null)}>
+        <Pressable style={styles.backdrop} onPress={() => setTopUp(null)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 4 }]}>
+              Add to "{topUpPlan?.name}"
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 12 }}>
+              Raises the planned amount — it doesn't record a payment.
+            </Text>
+            <MoneyInput
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg },
+              ]}
+              placeholder={`Amount to add (${currencySymbol().trim()})`}
+              value={topUpAmount}
+              onChangeText={setTopUpAmount}
+              autoFocus
+            />
+            {topUpAmt > 0 && (
+              <>
+                <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
+                  {amountToWords(topUpAmount)}
+                </Text>
+                <View style={[styles.liveBox, { backgroundColor: colors.chipBg }]}>
+                  <View style={[styles.liveRow, styles.liveTotalRow, { borderTopColor: colors.border, borderTopWidth: 0, marginTop: 0, paddingTop: 0 }]}>
+                    <Text style={{ color: colors.text, fontSize: 14, fontWeight: "800" }}>Planned</Text>
+                    <Text style={{ color: colors.primary, fontSize: 15, fontWeight: "800" }}>
+                      {formatMoney(topUpOld)} → {formatMoney(topUpNew)}
+                    </Text>
+                  </View>
+                  <View style={styles.liveRow}>
+                    <Text style={{ color: colors.textMuted, fontSize: 13 }}>Already paid</Text>
+                    <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                      {formatMoney(topUpPaid)}
+                    </Text>
+                  </View>
+                  <View style={styles.liveRow}>
+                    <Text style={{ color: colors.textMuted, fontSize: 13 }}>Left to pay</Text>
+                    <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                      {formatMoney(Math.max(0, topUpNew - topUpPaid))}
+                    </Text>
+                  </View>
+                  <View style={[styles.liveRow, styles.liveTotalRow, { borderTopColor: colors.border }]}>
+                    <Text style={{ color: colors.textMuted, fontSize: 13 }}>After plans</Text>
+                    <Text
+                      style={{
+                        color: topUpAfter < 0 ? colors.danger : colors.success,
+                        fontSize: 13,
+                        fontWeight: "700",
+                      }}
+                    >
+                      {formatMoney(afterPlans)} → {formatMoney(topUpAfter)}
+                    </Text>
+                  </View>
+                </View>
+              </>
+            )}
+            <View style={styles.actions}>
+              <Button title="Cancel" variant="secondary" onPress={() => setTopUp(null)} style={{ flex: 1 }} />
+              <Button title="Add" onPress={submitTopUp} style={{ flex: 1 }} />
             </View>
           </Pressable>
         </Pressable>
@@ -892,7 +1051,7 @@ function statusChip(p: PlanDoc, colors: any) {
   return map[p.status] || map.pending;
 }
 
-function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete, onUndo, onUndoMove }: any) {
+function PlanRow({ p, colors, onDetail, onTopUp, onDone, onPart, onMove, onEdit, onDelete, onUndo, onUndoMove }: any) {
   const { emoji: catEmoji } = useCategories();
   const planned = Number(p.planned) || 0;
   const paid = Number(p.paid) || 0;
@@ -955,6 +1114,9 @@ function PlanRow({ p, colors, onDetail, onDone, onPart, onMove, onEdit, onDelete
       </Pressable>
 
       <View style={styles.rowActions}>
+        {/* Raises the plan's amount — offered on done plans too, since that's
+            exactly how you re-open one that turned out to cost more. */}
+        {!isMoved && <MiniBtn label="+ Add" color={colors.primary} onPress={onTopUp} />}
         {!isMoved && !isDone && <MiniBtn label="Done" color={colors.primary} onPress={onDone} />}
         {!isMoved && !isDone && <MiniBtn label="Part" color={colors.text} onPress={onPart} />}
         {!isMoved && !isDone && <MiniBtn label="Move" color={colors.text} onPress={onMove} />}

@@ -32,6 +32,7 @@ import {
 } from "../firebase/firestore";
 import { formatMoney, amountToWords, currencySymbol } from "../util/money";
 import { toJsDate, formatDateTime } from "../util/date";
+import { derivePlanStatus } from "../util/plan";
 import { GoalDoc, GoalEntry, MonthDoc, PlanDoc } from "../types";
 
 export default function GoalScreen({ route, navigation }: any) {
@@ -199,14 +200,11 @@ export default function GoalScreen({ route, navigation }: any) {
         const payments = Array.isArray(linked.payments) ? linked.payments.slice() : [];
         payments.push({ name, amount: moveEntry.amount, paidAt: new Date() } as any);
         const newPaid = (Number(linked.paid) || 0) + moveEntry.amount;
-        const plannedAmt = Number(linked.planned) || 0;
-        const over = newPaid > plannedAmt; // don't mark done when it overflows the plan
-        const done = !over && newPaid >= plannedAmt;
+        const st = derivePlanStatus(linked, Number(linked.planned) || 0, newPaid, payments);
         await updatePlan(user.uid, moveTarget, linked.id, {
           payments,
           paid: newPaid,
-          status: done ? "done" : "partial",
-          actual: done ? newPaid : null,
+          ...(st || {}),
         } as any);
         console.log("[Goal] added under plan", { plan: linked.name, name, newPaid });
       } else {

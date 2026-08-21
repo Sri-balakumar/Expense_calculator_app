@@ -88,6 +88,9 @@ export interface PlanDoc {
   category?: string;
   edits?: PlanEdit[];
   status: PlanStatus;
+  // Closed by hand before it was fully paid ("Mark done" / "Finish"), so the
+  // status must not be re-derived from the numbers behind the user's back.
+  closedEarly?: boolean;
   actual?: number | null;
   paid?: number;
   payments?: PlanPayment[];
