@@ -5,6 +5,17 @@ export function toJsDate(v: any): Date | null {
   if (!v) return null;
   if (v instanceof Date) return v;
   if (typeof v.toDate === "function") return v.toDate();
+  // Values that have been through JSON — the offline read cache in util/cache.ts
+  // — keep their fields but lose their methods. A Firestore Timestamp arrives as
+  // { seconds, nanoseconds } and a plain Date as an ISO string. Without these,
+  // every cached record would date to null and lose its sort order, its week
+  // grouping and its place in the calendar.
+  if (typeof v.seconds === "number") return new Date(v.seconds * 1000);
+  if (typeof v._seconds === "number") return new Date(v._seconds * 1000);
+  if (typeof v === "string") {
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
   return null;
 }
 

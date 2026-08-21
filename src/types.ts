@@ -114,6 +114,10 @@ export interface UserDoc {
   name: string;
   salary: number;
   email: string;
+  // Currency every stored amount is denominated in. Lives on the account, not
+  // the device, so the same data reads the same everywhere. Changing it is a
+  // migration (see util/currencyMigrate.ts), never just a relabel by default.
+  currency?: string;
   // Global savings pot, shown as "Total with main balance"; not spent from months.
   mainBalance?: number;
   createdAt?: any;

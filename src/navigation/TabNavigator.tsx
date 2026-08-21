@@ -8,6 +8,7 @@ import MonthlyScreen from "../screens/MonthlyScreen";
 import BudgetsScreen from "../screens/BudgetsScreen";
 import PlansScreen from "../screens/PlansScreen";
 import YearScreen from "../screens/YearScreen";
+import DataScreen from "../screens/DataScreen";
 import ProfileScreen from "../screens/ProfileScreen";
 
 const Tab = createBottomTabNavigator();
@@ -17,6 +18,7 @@ const ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
   Budgets: "wallet-outline",
   Plans: "list-outline",
   Year: "stats-chart-outline",
+  Data: "server-outline",
   Profile: "person-outline",
 };
 
@@ -130,15 +132,16 @@ export default function TabNavigator() {
       <Tab.Screen name="Plans" component={PlansScreen} />
       <Tab.Screen name="Budgets" component={BudgetsScreen} />
       <Tab.Screen name="Year" component={YearScreen} />
+      <Tab.Screen name="Data" component={DataScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   );
 }
 
 const styles = StyleSheet.create({
-  tabItem: { alignItems: "center", justifyContent: "center", width: 66 },
+  tabItem: { alignItems: "center", justifyContent: "center", width: 56 },
   pill: {
-    width: 50,
+    width: 44,
     height: 34,
     borderRadius: 17,
     alignItems: "center",

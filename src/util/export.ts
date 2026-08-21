@@ -264,6 +264,54 @@ async function deliverFile(opts: {
   return false;
 }
 
+// Save a plain-text file the same way exports are saved: to the configured
+// folder if there is one, else a folder picker, else the share sheet.
+//
+// Text rather than base64 because JSON is UTF-8 and React Native has no btoa()
+// — encoding it would mean pulling in a polyfill for no gain, since
+// writeAsStringAsync writes UTF-8 natively.
+export async function exportText(opts: {
+  text: string;
+  filename: string;
+  ext: string;
+  mimeType: string;
+}): Promise<boolean> {
+  const { text, filename, ext, mimeType } = opts;
+  const name = safeFilename(filename);
+  const SAF: any = (FileSystem as any).StorageAccessFramework;
+
+  if (Platform.OS === "android" && SAF) {
+    try {
+      const prefs = await getDownloadPrefs();
+      if (prefs.enabled && prefs.folderUri) {
+        const destUri = await SAF.createFileAsync(prefs.folderUri, name, mimeType);
+        await FileSystem.writeAsStringAsync(destUri, text);
+        console.log("[Export] text saved to configured folder", destUri);
+        return true;
+      }
+    } catch (e: any) {
+      console.warn("[Export] configured folder save failed, asking for folder", e?.message);
+    }
+    try {
+      const perm = await SAF.requestDirectoryPermissionsAsync();
+      if (perm.granted) {
+        const destUri = await SAF.createFileAsync(perm.directoryUri, name, mimeType);
+        await FileSystem.writeAsStringAsync(destUri, text);
+        console.log("[Export] text saved to folder", destUri);
+        return true;
+      }
+      console.log("[Export] folder pick cancelled — sharing instead");
+    } catch (e: any) {
+      console.warn("[Export] SAF save failed, sharing instead", e?.message);
+    }
+  }
+
+  const cacheUri = FileSystem.cacheDirectory + name + ext;
+  await FileSystem.writeAsStringAsync(cacheUri, text);
+  await shareFile(cacheUri, mimeType);
+  return false;
+}
+
 // Prompt the user to pick a folder and remember it for direct exports.
 // Returns the friendly folder name, or null if unavailable/cancelled.
 export async function pickDownloadFolder(): Promise<string | null> {

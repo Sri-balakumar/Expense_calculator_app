@@ -9,6 +9,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { BarChart } from "react-native-gifted-charts";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,11 +17,17 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useTheme } from "../theme/ThemeContext";
 import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
+import { useFeedback } from "../components/Feedback";
 import { Card } from "../components/UI";
 import MonthPickerModal from "../components/MonthPickerModal";
 import HelpFab from "../components/HelpFab";
 import { HELP_MONTHLY } from "../constants/help";
-import { fetchMonthsData } from "../firebase/firestore";
+import {
+  fetchMonthsData,
+  monthContents,
+  deleteMonthDeep,
+  restoreMovedPlans,
+} from "../firebase/firestore";
 import { formatMoney } from "../util/money";
 import { useCategories } from "../context/CategoriesContext";
 import { MonthData } from "../types";
@@ -30,10 +37,12 @@ export default function MonthlyScreen({ navigation }: any) {
   const insets = useSafeAreaInsets();
   const { user, profile } = useAuth();
   const { label: catLabel } = useCategories();
+  const { confirm, toast } = useFeedback();
   const [months, setMonths] = useState<MonthData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [picker, setPicker] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const salary = Number(profile?.salary) || 0;
   const mainBalance = Number(profile?.mainBalance) || 0;
@@ -97,6 +106,66 @@ export default function MonthlyScreen({ navigation }: any) {
 
   // Trends — last 6 months, oldest first.
   const last6 = months.slice(0, 6).reverse();
+  // Deleting a month takes its expenses, plans and saved calculations with it —
+  // Firestore will not cascade on its own. The confirmation names the places the
+  // month actually holds data, so the user can judge before destroying it.
+  const onDeleteMonth = async (m: MonthData) => {
+    if (!user || deleting) return;
+    setDeleting(m.id);
+    try {
+      const c = await monthContents(user.uid, m.id);
+
+      const where: string[] = [];
+      // Saved calculations live in the month’s own "Saved" tab, so they count as
+      // Monthly too — otherwise a month holding only those would read "is empty"
+      // while the line underneath listed them.
+      if (c.expenses > 0 || c.savedCalcs > 0) where.push("Monthly");
+      if (c.plans > 0) where.push("Plans");
+      const location =
+        where.length === 2
+          ? `${m.name} is in Monthly and Plans.`
+          : where.length === 1
+          ? `${m.name} is in ${where[0]} alone.`
+          : `${m.name} is empty.`;
+
+      const bits: string[] = [];
+      if (c.expenses) bits.push(`${c.expenses} ${c.expenses === 1 ? "entry" : "entries"}`);
+      if (c.plans) bits.push(`${c.plans} ${c.plans === 1 ? "plan" : "plans"}`);
+      if (c.savedCalcs)
+        bits.push(`${c.savedCalcs} saved calculation${c.savedCalcs === 1 ? "" : "s"}`);
+
+      // Plans in other months that were moved here would otherwise be left
+      // pointing at a month that no longer exists — say so up front.
+      const moved = c.movedHere.length
+        ? `\n\n${c.movedHere.length} plan${c.movedHere.length === 1 ? "" : "s"} in ` +
+          `${[...new Set(c.movedHere.map((r) => r.monthName))].join(", ")} ` +
+          `${c.movedHere.length === 1 ? "was" : "were"} moved here. ` +
+          `${c.movedHere.length === 1 ? "It" : "They"} will be restored as pending.`
+        : "";
+
+      const ok = await confirm({
+        title: `Delete ${m.name}?`,
+        message:
+          location +
+          (bits.length ? `\n\n${bits.join("  ·  ")}` : "") +
+          moved +
+          "\n\nThis permanently deletes all of it and cannot be undone.",
+        confirmText: "Delete",
+      });
+      if (!ok) return;
+
+      await deleteMonthDeep(user.uid, m.id);
+      await restoreMovedPlans(user.uid, c.movedHere);
+      toast(`${m.name} deleted`, "success");
+      await load();
+    } catch (e: any) {
+      console.log("[Monthly] delete failed", e?.message);
+      toast("Couldn’t delete that month. Try again.", "error");
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   const barData = last6.map((m) => ({
     value: Math.max(0, m.spent),
     label: m.name.split(" ")[0].slice(0, 3),
@@ -219,7 +288,19 @@ export default function MonthlyScreen({ navigation }: any) {
                       </Text>
                     </Text>
                   </View>
-                  <Text style={{ color: colors.textMuted, fontSize: 22, marginLeft: 8 }}>›</Text>
+                  <Pressable
+                    onPress={() => onDeleteMonth(m)}
+                    disabled={!!deleting}
+                    hitSlop={10}
+                    style={{ padding: 6, marginLeft: 4 }}
+                  >
+                    {deleting === m.id ? (
+                      <ActivityIndicator size="small" color={colors.danger} />
+                    ) : (
+                      <Ionicons name="trash-outline" size={18} color={colors.danger} />
+                    )}
+                  </Pressable>
+                  <Text style={{ color: colors.textMuted, fontSize: 22, marginLeft: 4 }}>›</Text>
                 </Pressable>
               ))}
             </Card>

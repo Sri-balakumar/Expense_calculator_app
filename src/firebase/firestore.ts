@@ -33,6 +33,7 @@ import {
   GoalEntry,
 } from "../types";
 import { derivePlanStatus } from "../util/plan";
+import { cacheKeys, isOfflineError, loadCache, saveCache } from "../util/cache";
 
 // ---- path helpers -----------------------------------------------------------
 const userRef = (uid: string) => doc(db, "users", uid);
@@ -67,8 +68,19 @@ function docsToExpenses(snap: QuerySnapshot<DocumentData>): Expense[] {
 
 // ---- user -------------------------------------------------------------------
 export async function getUser(uid: string): Promise<UserDoc | null> {
-  const snap = await getDoc(userRef(uid));
-  return snap.exists() ? (snap.data() as UserDoc) : null;
+  try {
+    const snap = await getDoc(userRef(uid));
+    const doc = snap.exists() ? (snap.data() as UserDoc) : null;
+    if (doc) saveCache(cacheKeys.profile(uid), doc);
+    return doc;
+  } catch (e) {
+    // Offline on a cold start: salary, currency and name all come from here, so
+    // without a fallback the whole app renders as a brand-new empty account.
+    if (!isOfflineError(e)) throw e;
+    const cached = await loadCache<UserDoc>(cacheKeys.profile(uid));
+    console.log("[Offline] profile from cache:", !!cached);
+    return cached?.value ?? null;
+  }
 }
 
 export async function createUserDoc(uid: string, data: UserDoc): Promise<void> {
@@ -108,7 +120,31 @@ export async function listAllUsers(): Promise<AdminUserRow[]> {
 }
 
 // ---- months + aggregation (port of fetchMonthsData) -------------------------
+// Cached: this one call backs the Monthly list, the Plans tab and the month
+// picker, so caching it is what makes the app usable at all on a cold start
+// with no signal. `salary` only affects the derived `remaining`, which is
+// recomputed from the cached figures rather than trusted from the cache.
 export async function fetchMonthsData(
+  uid: string,
+  salary: number
+): Promise<MonthData[]> {
+  try {
+    const fresh = await fetchMonthsDataLive(uid, salary);
+    saveCache(cacheKeys.months(uid), fresh);
+    return fresh;
+  } catch (e) {
+    if (!isOfflineError(e)) throw e;
+    const cached = await loadCache<MonthData[]>(cacheKeys.months(uid));
+    console.log("[Offline] months from cache:", cached?.value?.length ?? "none");
+    if (!cached) throw e;
+    return cached.value.map((m) => ({
+      ...m,
+      remaining: salary - m.spent + m.income,
+    }));
+  }
+}
+
+async function fetchMonthsDataLive(
   uid: string,
   salary: number
 ): Promise<MonthData[]> {
@@ -252,6 +288,118 @@ export async function updateMonth(
   await updateDoc(monthRef(uid, id), updates);
 }
 
+// ---- deleting a month --------------------------------------------------
+//
+// Firestore does NOT cascade: deleting the month document on its own would
+// leave its expenses/plans/savedCalculations alive forever — invisible in the
+// app, unreachable, and still counted as storage. Everything below exists so a
+// month can actually be removed, and so the user is told what they are about
+// to destroy before it happens.
+
+const MONTH_SUBCOLLECTIONS = ["expenses", "plans", "savedCalculations"] as const;
+
+// Firestore caps a batch at 500 writes; leave headroom.
+const DELETE_BATCH = 400;
+
+/** A plan in some OTHER month that was moved into this one. */
+export interface MovedHereRef {
+  monthId: string;
+  monthName: string;
+  planId: string;
+  planName: string;
+  paid: number;
+}
+
+export interface MonthContents {
+  expenses: number;
+  plans: number;
+  savedCalcs: number;
+  /** Plans elsewhere pointing at this month, which would be stranded by a delete. */
+  movedHere: MovedHereRef[];
+}
+
+// What is actually inside a month. Read before asking the user to confirm, so
+// the numbers in the dialog are real rather than assumed.
+export async function monthContents(uid: string, monthId: string): Promise<MonthContents> {
+  const [exp, plans, calcs] = await Promise.all(
+    MONTH_SUBCOLLECTIONS.map((c) => getDocs(collection(monthRef(uid, monthId), c)))
+  );
+
+  // A plan in another month can point here via movedToMonthId. Deleting this
+  // month would leave it reading "moved to <gone>" with no way to resolve.
+  const movedHere: MovedHereRef[] = [];
+  const monthsSnap = await getDocs(monthsCol(uid));
+  await Promise.all(
+    monthsSnap.docs
+      .filter((m) => m.id !== monthId)
+      .map(async (m) => {
+        const ps = await getDocs(collection(m.ref, "plans"));
+        ps.forEach((p) => {
+          const d = p.data() as any;
+          if (d?.movedToMonthId === monthId) {
+            movedHere.push({
+              monthId: m.id,
+              monthName: (m.data() as any)?.name || "another month",
+              planId: p.id,
+              planName: d?.name || "a plan",
+              paid: Number(d?.paid) || 0,
+            });
+          }
+        });
+      })
+  );
+
+  const out = {
+    expenses: exp.size,
+    plans: plans.size,
+    savedCalcs: calcs.size,
+    movedHere,
+  };
+  console.log("[Month] contents", monthId, out);
+  return out;
+}
+
+// Delete a month and everything beneath it.
+//
+// Children go first and the month document goes LAST, deliberately: if a batch
+// fails partway the month is still listed and the user can retry. Deleting the
+// parent first would hide the survivors and make them unreachable.
+export async function deleteMonthDeep(uid: string, monthId: string): Promise<void> {
+  const mRef = monthRef(uid, monthId);
+
+  const refs: any[] = [];
+  for (const name of MONTH_SUBCOLLECTIONS) {
+    const snap = await getDocs(collection(mRef, name));
+    snap.forEach((d) => refs.push(d.ref));
+  }
+
+  for (let i = 0; i < refs.length; i += DELETE_BATCH) {
+    const batch = writeBatch(db);
+    refs.slice(i, i + DELETE_BATCH).forEach((r) => batch.delete(r));
+    await batch.commit();
+  }
+
+  await deleteDoc(mRef);
+  console.log("[Month] deleted", monthId, "with", refs.length, "child documents");
+}
+
+// Bring plans that were moved into a now-deleted month back to life in their own
+// month. Mirrors what "Undo move" does in PlanScreen: a plan that had money
+// against it reopens as partial, an untouched one as pending.
+export async function restoreMovedPlans(uid: string, refs: MovedHereRef[]): Promise<void> {
+  for (const r of refs) {
+    await updatePlan(uid, r.monthId, r.planId, {
+      status: r.paid > 0 ? "partial" : "pending",
+      actual: null,
+      movedTo: null,
+      movedToMonthId: null,
+      movedToPlanId: null,
+    } as any).catch((e) => console.log("[Month] restore failed", r.planName, e));
+  }
+  if (refs.length) console.log("[Month] restored moved plans", refs.length);
+}
+
+
 // ---- expenses (work for both months and budgets) ---------------------------
 export function watchExpenses(
   uid: string,
@@ -260,9 +408,38 @@ export function watchExpenses(
   cb: (expenses: Expense[]) => void,
   onError?: (e: any) => void
 ): () => void {
+  let live = false;   // a server snapshot has arrived; stop trusting the cache
+  let primed = false; // cached data is currently on screen
+  const key = cacheKeys.expenses(uid, type, id);
+
+  // Show last-known entries straight away. Dropped if the server answers first,
+  // so a fast connection never flashes stale data over fresh data.
+  loadCache<Expense[]>(key).then((cached) => {
+    if (!live && cached?.value?.length) {
+      console.log("[Offline] expenses from cache", cached.value.length);
+      primed = true;
+      cb(cached.value);
+    }
+  });
+
   return onSnapshot(
     expensesColFor(uid, type, id),
-    (snap) => cb(docsToExpenses(snap)),
+    (snap) => {
+      const list = docsToExpenses(snap);
+      // Offline, Firestore raises an initial event from its empty in-memory
+      // cache. Writing that to storage would erase the very data we are trying
+      // to preserve, so only server-confirmed snapshots are persisted.
+      if (!snap.metadata.fromCache) {
+        live = true;
+        saveCache(key, list);
+      } else if (!live && primed && list.length === 0) {
+        // Empty in-memory-cache event while real cached data is on screen:
+        // swallow it. Without the `primed` check the caller would never get a
+        // callback at all and its loading spinner would hang forever.
+        return;
+      }
+      cb(list);
+    },
     onError
   );
 }
@@ -482,9 +659,30 @@ export function watchPlans(
   cb: (plans: PlanDoc[]) => void,
   onError?: (e: any) => void
 ): () => void {
+  let live = false;
+  let primed = false;
+  const key = cacheKeys.plans(uid, monthId);
+
+  loadCache<PlanDoc[]>(key).then((cached) => {
+    if (!live && cached?.value?.length) {
+      console.log("[Offline] plans from cache", cached.value.length);
+      primed = true;
+      cb(cached.value);
+    }
+  });
+
   return onSnapshot(
     plansCol(uid, monthId),
-    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))),
+    (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PlanDoc[];
+      if (!snap.metadata.fromCache) {
+        live = true;
+        saveCache(key, list);
+      } else if (!live && primed && list.length === 0) {
+        return;
+      }
+      cb(list);
+    },
     onError
   );
 }

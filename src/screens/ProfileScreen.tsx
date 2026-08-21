@@ -1,5 +1,6 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Modal,
   Pressable,
   ScrollView,
@@ -42,7 +43,16 @@ import {
   updatePaymentMethod,
   deletePaymentMethod,
 } from "../firebase/firestore";
-import { formatMoney, amountToWords, currencySymbol } from "../util/money";
+import { formatMoney, formatMoneyIn, amountToWords, currencySymbol, CURRENCIES } from "../util/money";
+import { fetchRate } from "../util/fx";
+import {
+  MoneyDoc,
+  batchCount,
+  buildUpdates,
+  commitUpdates,
+  countAmounts,
+  readMoneyDocs,
+} from "../util/currencyMigrate";
 import { CATEGORY_PALETTE, CATEGORY_KEYS, PAYMENT_METHODS } from "../constants/categories";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { usePaymentMethods } from "../context/PaymentMethodsContext";
@@ -63,6 +73,17 @@ export default function ProfileScreen() {
   const [pickedCur, setPickedCur] = useState(curCode); // pending currency choice (Save to apply)
   const [curModal, setCurModal] = useState(false);
   const [curSearch, setCurSearch] = useState("");
+  // Changing currency is a migration, not a relabel — this drives the popup that
+  // makes the user choose which one they actually mean.
+  const [switchTo, setSwitchTo] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [moneyDocs, setMoneyDocs] = useState<MoneyDoc[] | null>(null);
+  const [amountCount, setAmountCount] = useState(0);
+  const [rateText, setRateText] = useState("");
+  const [rateLoading, setRateLoading] = useState(false);
+  const [rateFetched, setRateFetched] = useState(false);
+  const [converting, setConverting] = useState(false);
+  const [convProgress, setConvProgress] = useState<{ done: number; total: number } | null>(null);
   // Download folder prefs
   const [dlEnabled, setDlEnabled] = useState(false);
   const [dlFolder, setDlFolder] = useState<string | null>(null);
@@ -501,6 +522,123 @@ export default function ProfileScreen() {
     await setCategoryBudget(user.uid, key, isNaN(val) ? 0 : val);
   };
 
+  // ---- currency switch -------------------------------------------------
+  const rate = Number(rateText);
+  const rateValid = !!rateText.trim() && !isNaN(rate) && rate > 0;
+  const toDef = switchTo ? CURRENCIES.find((c) => c.code === switchTo) : null;
+  // Preview against a real figure of the user’s where possible, so the effect
+  // of the rate is obvious rather than abstract.
+  const sample = Number(profile?.salary) || Number(profile?.mainBalance) || 1000;
+
+  // Read every money-bearing document once when the popup opens, and ask for
+  // today’s rate. The read is the expensive half; re-costing the preview as the
+  // user edits the rate is pure arithmetic over what we already hold.
+  useEffect(() => {
+    if (!switchTo || !user) return;
+    let cancelled = false;
+    setMoneyDocs(null);
+    setAmountCount(0);
+    setRateText("");
+    setRateFetched(false);
+    setScanning(true);
+    setRateLoading(true);
+    (async () => {
+      try {
+        const docs = await readMoneyDocs(user.uid);
+        if (cancelled) return;
+        setMoneyDocs(docs);
+        setAmountCount(countAmounts(docs));
+      } catch (e) {
+        console.log("[Currency] scan failed", e);
+        if (!cancelled) setMoneyDocs([]);
+      } finally {
+        if (!cancelled) setScanning(false);
+      }
+    })();
+    (async () => {
+      const r = await fetchRate(curCode, switchTo);
+      if (cancelled) return;
+      if (r) {
+        setRateText(String(r));
+        setRateFetched(true);
+      }
+      setRateLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [switchTo, user, curCode]);
+
+  const closeSwitch = () => {
+    if (converting) return; // never abandon a half-written migration
+    setSwitchTo(null);
+    setMoneyDocs(null);
+    setConvProgress(null);
+  };
+
+  // "I picked the wrong currency" — the numbers were never in the old currency
+  // to begin with, so relabelling is the honest thing to do.
+  const doRelabel = async () => {
+    if (!switchTo) return;
+    const ok = await confirm({
+      title: "Relabel without converting?",
+      message:
+        `${amountCount} amount${amountCount === 1 ? "" : "s"} keep exactly the same numbers and simply show as ` +
+        `${toDef?.symbol.trim()}. ${formatMoneyIn(curCode, sample)} becomes ${formatMoneyIn(switchTo, sample)}.` +
+        "\n\nOnly do this if the currency was wrong to begin with.",
+      confirmText: "Relabel",
+    });
+    if (!ok) return;
+    const target = switchTo;
+    setSwitchTo(null);
+    setMoneyDocs(null);
+    await setCurrency(target);
+    toast(`Now showing ${target} — amounts unchanged`, "success");
+  };
+
+  const doConvert = async () => {
+    if (!switchTo || !moneyDocs || !rateValid || converting) return;
+    const updates = buildUpdates(moneyDocs, rate);
+    const chunks = batchCount(updates);
+    const ok = await confirm({
+      title: `Convert ${amountCount} amount${amountCount === 1 ? "" : "s"}?`,
+      message:
+        `Every stored figure is multiplied by ${rate} and rewritten in ${switchTo}. ` +
+        `${formatMoneyIn(curCode, sample)} becomes ${formatMoneyIn(switchTo, sample * rate)}.` +
+        (chunks > 1
+          ? `\n\nThis writes in ${chunks} batches. If it is interrupted partway, some amounts will be converted and others not.`
+          : "") +
+        "\n\nThis cannot be undone automatically.",
+      confirmText: "Convert",
+    });
+    if (!ok) return;
+    setConverting(true);
+    setConvProgress({ done: 0, total: updates.length });
+    try {
+      await commitUpdates(updates, (done, total) => setConvProgress({ done, total }));
+      const target = switchTo;
+      setConverting(false);
+      setSwitchTo(null);
+      setMoneyDocs(null);
+      setConvProgress(null);
+      await setCurrency(target);
+      toast(`Converted to ${target}`, "success");
+    } catch (e: any) {
+      setConverting(false);
+      setConvProgress(null);
+      console.log("[Currency] convert failed", e?.message);
+      // The account currency is deliberately left alone: the data is in a mixed
+      // state and claiming the switch succeeded would be a lie.
+      await confirm({
+        title: "Conversion didn’t finish",
+        message:
+          `${e?.message || "Something went wrong."}` +
+          `\n\nYour currency is still ${curCode}. Check your figures before retrying — amounts that were already converted would be multiplied a second time.`,
+        confirmText: "OK",
+      });
+    }
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
       <Watermark />
@@ -782,6 +920,123 @@ export default function ProfileScreen() {
         Sri Balakumar  🤍  |  version 1.0.0
       </Text>
 
+      {/* Currency switch — convert the stored amounts, or just relabel them */}
+      <Modal visible={!!switchTo} transparent animationType="fade" onRequestClose={closeSwitch}>
+        <Pressable style={styles.backdrop} onPress={closeSwitch}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 4 }]}>
+              Change currency
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 15, fontWeight: "700", marginBottom: 12 }}>
+              {curSymbol.trim()} {curCode}  →  {toDef?.symbol.trim()} {switchTo}
+            </Text>
+
+            {scanning ? (
+              <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 6 }}>
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={{ color: colors.textMuted, fontSize: 13, marginLeft: 8 }}>
+                  Checking your data…
+                </Text>
+              </View>
+            ) : (
+              <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 4 }}>
+                {amountCount === 0
+                  ? "You have no stored amounts yet — nothing to convert."
+                  : `${amountCount} stored amount${amountCount === 1 ? "" : "s"} across your months, plans, budgets and goals.`}
+              </Text>
+            )}
+
+            {amountCount > 0 && (
+              <>
+                <Text style={{ color: colors.textMuted, fontSize: 13, fontWeight: "600", marginTop: 14, marginBottom: 6 }}>
+                  Exchange rate (1 {curCode} = ? {switchTo})
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg },
+                  ]}
+                  value={rateText}
+                  onChangeText={(t) => {
+                    setRateText(t);
+                    setRateFetched(false); // hand-edited: stop calling it today’s rate
+                  }}
+                  keyboardType="numeric"
+                  placeholder={rateLoading ? "Fetching today’s rate…" : "e.g. 0.0104"}
+                  placeholderTextColor={colors.textMuted}
+                  editable={!converting}
+                />
+                <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 4 }}>
+                  {rateLoading
+                    ? "Looking up today’s rate…"
+                    : rateFetched
+                    ? "Today’s rate — edit it if you want a different one."
+                    : rateText.trim()
+                    ? "Using the rate you entered."
+                    : "Couldn’t fetch a rate — type one in to convert."}
+                </Text>
+
+                {rateValid && (
+                  <View style={[styles.previewBox, { backgroundColor: colors.chipBg }]}>
+                    <Text style={{ color: colors.textMuted, fontSize: 12 }}>Preview</Text>
+                    <Text style={{ color: colors.text, fontWeight: "800", fontSize: 16, marginTop: 2 }}>
+                      {formatMoneyIn(curCode, sample)}  →  {formatMoneyIn(switchTo!, sample * rate)}
+                    </Text>
+                  </View>
+                )}
+              </>
+            )}
+
+            {converting && convProgress && (
+              <Text style={{ color: colors.primary, fontSize: 12, marginTop: 10, fontWeight: "700" }}>
+                Converting… {convProgress.done} of {convProgress.total} records. Keep the app open.
+              </Text>
+            )}
+
+            {amountCount > 0 && (
+              <>
+                <Button
+                  title="Convert amounts"
+                  onPress={doConvert}
+                  loading={converting}
+                  disabled={!rateValid || scanning || converting}
+                  style={{ marginTop: 16 }}
+                />
+                <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 6, marginBottom: 12 }}>
+                  Multiplies every stored amount by the rate. Use this if you have moved to a new
+                  currency and want your history to follow.
+                </Text>
+                <Button
+                  title="Just relabel"
+                  variant="secondary"
+                  onPress={doRelabel}
+                  disabled={converting}
+                />
+                <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 6 }}>
+                  Keeps the numbers exactly as they are and only changes the symbol. Use this if
+                  the currency was simply set wrong.
+                </Text>
+              </>
+            )}
+
+            {amountCount === 0 && !scanning && (
+              <Button
+                title={`Switch to ${switchTo}`}
+                onPress={doRelabel}
+                style={{ marginTop: 16 }}
+              />
+            )}
+
+            <Button
+              title="Cancel"
+              variant="secondary"
+              onPress={closeSwitch}
+              disabled={converting}
+              style={{ marginTop: 14 }}
+            />
+          </Pressable>
+        </Pressable>
+      </Modal>
       {/* Currency picker (search + symbol/name rows + Save inside) */}
       <Modal visible={curModal} transparent animationType="fade" onRequestClose={() => setCurModal(false)}>
         <Pressable style={styles.backdrop} onPress={() => setCurModal(false)}>
@@ -845,9 +1100,12 @@ export default function ProfileScreen() {
               <Button
                 title="Save"
                 onPress={() => {
-                  console.log("[Profile] save currency", pickedCur);
+                  console.log("[Profile] currency chosen", pickedCur);
                   setCurModal(false);
-                  if (pickedCur !== curCode) setCurrency(pickedCur); // remounts → changes everywhere
+                  // Never switch straight away — every amount already stored is
+                  // in the old currency, so the user has to say what happens to
+                  // them before anything changes.
+                  if (pickedCur !== curCode) setSwitchTo(pickedCur);
                 }}
                 style={{ flex: 1 }}
               />
@@ -1068,6 +1326,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     fontSize: 16,
   },
+  previewBox: { marginTop: 12, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
   curField: {
     borderWidth: 1,
     borderRadius: 12,

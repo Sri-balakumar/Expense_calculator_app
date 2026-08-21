@@ -62,6 +62,17 @@ export const HELP_YEAR: HelpContent = {
     "Looking at 2026 you notice May and October are nearly double every other month — that's when your insurance premiums land. Now you know to plan for them next year instead of being surprised twice.",
 };
 
+export const HELP_DATA: HelpContent = {
+  title: "Data",
+  body: [
+    "Everything the app has stored for you, counted up — how many entries, plans, budgets and goals exist, and how big all of it is.",
+    "The Export backup button writes the lot to a single JSON file: every entry, plan, budget, goal, category and your profile settings, exactly as they are.",
+    "Two things in this app can’t be undone — converting every amount to a new currency, and deleting a month with everything inside it. Take a backup first and you always have a way back.",
+  ],
+  example:
+    "Before switching from rupees to dollars, you open Data, see 214 documents totalling 86 KB, and tap Export backup. The file lands in your downloads folder. If the conversion rate turns out wrong, you still have the original figures.",
+};
+
 export const HELP_PROFILE: HelpContent = {
   title: "Profile & settings",
   body: [

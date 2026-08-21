@@ -104,6 +104,20 @@ export function amountToWords(amount: number | string | null | undefined): strin
   return `${words} ${active.word}`;
 }
 
+// Format in a specific currency without disturbing the active one. Used by the
+// currency switch to preview "before -> after" side by side, since formatMoney()
+// itself always speaks whatever currency the account is currently set to.
+export function formatMoneyIn(code: string, amount: number | string | null | undefined): string {
+  const prev = active;
+  const next = CURRENCIES.find((c) => c.code === code);
+  if (next) active = next;
+  try {
+    return formatMoney(amount);
+  } finally {
+    active = prev;
+  }
+}
+
 export function formatMoney(amount: number | string | null | undefined): string {
   const n = Number(amount) || 0;
   const sign = n < 0 ? "-" : "";
