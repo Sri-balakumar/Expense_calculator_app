@@ -45,19 +45,26 @@ export function dateToInputValue(d: Date | null): string {
   return `${d.getFullYear()}-${mo}-${day}`;
 }
 
-// "YYYY-MM-DD" -> Firestore Timestamp keeping current time-of-day.
+// "YYYY-MM-DD" -> Firestore Timestamp on that day. The picker only asks for a
+// calendar day, so the time-of-day comes from `baseTime` when one is given —
+// editing an entry passes its existing createdAt so the original time survives
+// — and from the clock otherwise.
 // Empty string -> null (caller should use serverTimestamp()).
-export function inputValueToTimestamp(value: string): Timestamp | null {
+export function inputValueToTimestamp(
+  value: string,
+  baseTime?: Date | null
+): Timestamp | null {
   if (!value) return null;
   const p = value.split("-");
-  const now = new Date();
+  const base =
+    baseTime instanceof Date && !isNaN(baseTime.getTime()) ? baseTime : new Date();
   const chosen = new Date(
     Number(p[0]),
     Number(p[1]) - 1,
     Number(p[2]),
-    now.getHours(),
-    now.getMinutes(),
-    now.getSeconds()
+    base.getHours(),
+    base.getMinutes(),
+    base.getSeconds()
   );
   if (isNaN(chosen.getTime())) return null;
   return Timestamp.fromDate(chosen);

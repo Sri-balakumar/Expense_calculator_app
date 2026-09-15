@@ -204,7 +204,13 @@ export default function MonthScreen({ route, navigation }: any) {
   const syncPlanForExpense = useCallback(
     async (
       expenseId: string,
-      patch: { name: string; amount: number; category?: string; paymentMethod?: string } | null
+      patch: {
+        name: string;
+        amount: number;
+        category?: string;
+        paymentMethod?: string;
+        paidAt?: Date;
+      } | null
     ) => {
       if (!user || type !== "month") return;
       const link = planByExpense.get(expenseId);
@@ -456,7 +462,11 @@ export default function MonthScreen({ route, navigation }: any) {
         if (!ok) return;
       }
     }
-    const ts = inputValueToTimestamp(r.dateValue);
+    // The form only round-trips a calendar day, so on an edit the time comes
+    // from the entry itself — otherwise every save would re-stamp it with "now".
+    const baseTime =
+      formMode === "edit" && editTarget ? toJsDate(editTarget.createdAt) : null;
+    const ts = inputValueToTimestamp(r.dateValue, baseTime);
     const payload: any = {
       name: r.name,
       amount: r.amount,
@@ -483,6 +493,7 @@ export default function MonthScreen({ route, navigation }: any) {
                 amount: r.amount,
                 category: r.category,
                 paymentMethod: r.paymentMethod,
+                ...(ts ? { paidAt: ts.toDate() } : {}),
               }
             : null
         );

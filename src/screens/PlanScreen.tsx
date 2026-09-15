@@ -310,7 +310,9 @@ export default function PlanScreen({ route, navigation }: any) {
         category: r.category,
         paymentMethod: r.paymentMethod,
         notes: r.notes,
-        paidAt: inputValueToDate(r.dateValue),
+        // Same instant as the expense's createdAt above. Deriving it from the
+        // date string again would drop the time and stamp midnight.
+        paidAt: ts ? ts.toDate() : new Date(),
       });
       const newPaid = (Number(p.paid) || 0) + r.amount;
       // Once it's fully paid the plan closes itself — otherwise its "Part" button
@@ -1198,6 +1200,10 @@ function PlanDetail({ p, colors, expenseById, onRemove }: any) {
           {payments.map((pay: any, i: number) => {
             const exp = pay.expenseId ? expenseById[pay.expenseId] : null;
             const nm = pay.name || (exp && exp.name) || p.name;
+            // The linked entry owns the timestamp; the payment's own copy is the
+            // fallback for unlinked rows and for ones written before paidAt kept
+            // its time — those would otherwise all read 12:00 am.
+            const when = (exp && toJsDate(exp.createdAt)) || toJsDate(pay.paidAt);
             // Highlight the item(s) that pushed the plan over its plan.
             const isCulprit = over && Number(pay.amount) > planned;
             return (
@@ -1206,7 +1212,7 @@ function PlanDetail({ p, colors, expenseById, onRemove }: any) {
                   {isCulprit ? "⚠️ " : ""}
                   {nm}{" "}
                   <Text style={{ fontSize: 11 }}>
-                    {pay.paidAt ? `· ${formatDateTime(toJsDate(pay.paidAt))}` : ""}
+                    {when ? `· ${formatDateTime(when)}` : ""}
                   </Text>
                 </Text>
                 <View style={{ flexDirection: "row", alignItems: "center", flexShrink: 0, marginLeft: 8 }}>
