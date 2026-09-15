@@ -11,6 +11,8 @@ import { CategoriesProvider } from "./src/context/CategoriesContext";
 import { PaymentMethodsProvider } from "./src/context/PaymentMethodsContext";
 import { PinProvider } from "./src/context/PinContext";
 import { CurrencyProvider } from "./src/context/CurrencyContext";
+import { SyncProvider } from "./src/context/SyncContext";
+import OfflineBanner from "./src/components/OfflineBanner";
 import RootNavigator from "./src/navigation/RootNavigator";
 import { FONT_ASSETS, applyGlobalFont } from "./src/theme/fonts";
 
@@ -35,6 +37,8 @@ function ThemedApp() {
     <NavigationContainer>
       <StatusBar style={mode === "dark" ? "light" : "dark"} />
       <RootNavigator />
+      {/* Last child so it paints over the screens, like the toast does. */}
+      <OfflineBanner />
     </NavigationContainer>
   );
 }
@@ -58,9 +62,11 @@ export default function App() {
             <CategoriesProvider>
               <PaymentMethodsProvider>
                 <PinProvider>
-                  <CurrencyProvider>
-                    <ThemedApp />
-                  </CurrencyProvider>
+                  <SyncProvider>
+                    <CurrencyProvider>
+                      <ThemedApp />
+                    </CurrencyProvider>
+                  </SyncProvider>
                 </PinProvider>
               </PaymentMethodsProvider>
             </CategoriesProvider>

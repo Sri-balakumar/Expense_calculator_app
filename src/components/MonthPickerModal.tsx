@@ -39,12 +39,18 @@ export default function MonthPickerModal({
   const [pending, setPending] = useState<string | null>(null); // fullName awaiting balance
   const [balance, setBalance] = useState("");
   const [busy, setBusy] = useState(false);
+  // The existing-months load failing used to be swallowed, leaving `existing`
+  // empty — so every month looked free to create and a duplicate was one tap
+  // away. Track the failure and say so instead of guessing.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   // Carry-over from the most recent month's leftover balance.
   const [lastRemaining, setLastRemaining] = useState(0);
   const [lastMonthName, setLastMonthName] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible || !user) return;
+    setLoadFailed(false);
     fetchMonthsData(user.uid, Number(profile?.salary) || 0)
       .then((months) => {
         const map: Record<string, string> = {};
@@ -54,7 +60,10 @@ export default function MonthPickerModal({
         setLastRemaining(latest ? Math.max(0, Number(latest.totalRemaining) || 0) : 0);
         setLastMonthName(latest ? latest.name : null);
       })
-      .catch(() => {});
+      .catch((e) => {
+        console.log("[MonthPicker] couldn't load existing months", e);
+        setLoadFailed(true);
+      });
   }, [visible, user, profile?.salary]);
 
   const onTile = (monthName: string) => {
@@ -66,19 +75,35 @@ export default function MonthPickerModal({
     }
     // Pre-fill with last month's leftover so it carries over by default.
     setBalance(lastRemaining > 0 ? String(lastRemaining) : "");
+    setError(null);
     setPending(fullName);
   };
 
   const confirmCreate = async () => {
     if (!user || !pending) return;
-    const bal = Number(balance) || 0;
-    if (bal < 0) return;
+    // Not parseAmount: a starting balance of zero is perfectly legitimate,
+    // where an expense of zero is not. Still rejects Infinity/NaN. A negative
+    // balance used to be a bare `return` — the user tapped Create and nothing
+    // happened, with nothing said about why.
+    const bal = balance.trim() === "" ? 0 : Number(balance);
+    if (!Number.isFinite(bal)) {
+      setError("That isn't a number we can use.");
+      return;
+    }
+    if (bal < 0) {
+      setError("Starting balance can't be negative.");
+      return;
+    }
+    setError(null);
     setBusy(true);
     try {
-      const id = await createMonth(user.uid, pending, bal);
+      const id = await createMonth(user.uid, pending, Math.round(bal * 100) / 100);
       setPending(null);
       onClose();
       onOpenMonth(id);
+    } catch (e) {
+      console.log("[MonthPicker] create failed", e);
+      setError("Couldn't create that month. Try again.");
     } finally {
       setBusy(false);
     }
@@ -100,6 +125,21 @@ export default function MonthPickerModal({
               </Pressable>
             </View>
           </View>
+
+          {loadFailed && (
+            <Text
+              style={{
+                color: colors.danger,
+                fontSize: 12,
+                fontWeight: "600",
+                textAlign: "center",
+                marginBottom: 8,
+              }}
+            >
+              Couldn't check which months you already have — a month shown as
+              "Create" may already exist.
+            </Text>
+          )}
 
           <View style={styles.grid}>
             {MONTH_NAMES.map((m) => {
@@ -167,9 +207,17 @@ export default function MonthPickerModal({
               ]}
               placeholder="e.g. 5000"
               value={balance}
-              onChangeText={setBalance}
+              onChangeText={(t) => {
+                setBalance(t);
+                if (error) setError(null);
+              }}
               autoFocus
             />
+            {error && (
+              <Text style={{ color: colors.danger, fontSize: 12, marginTop: 6, fontWeight: "600" }}>
+                {error}
+              </Text>
+            )}
             <View style={styles.actions}>
               <Pressable
                 style={[styles.actBtn, { backgroundColor: colors.chipBg }]}

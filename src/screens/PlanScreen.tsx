@@ -24,14 +24,20 @@ import {
   updatePlan,
   deletePlan,
   getPlan,
-  addExpense,
+  addExpenseLocal,
   deleteExpense,
   listMonths,
   movePaymentToPlan,
   movePlans,
 } from "../firebase/firestore";
 import DateTimePicker from "@react-native-community/datetimepicker";
-import { formatMoney, amountToWords, currencySymbol } from "../util/money";
+import {
+  amountError,
+  amountToWords,
+  currencySymbol,
+  formatMoney,
+  parseAmount,
+} from "../util/money";
 import {
   toJsDate,
   formatDateTime,
@@ -43,6 +49,7 @@ import {
 } from "../util/date";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
 import { derivePlanStatus } from "../util/plan";
+import { settleOrQueue, isOffline } from "../firebase/writes";
 import { PlanDoc, PlanEdit, Expense, MonthDoc } from "../types";
 
 export default function PlanScreen({ route, navigation }: any) {
@@ -202,9 +209,10 @@ export default function PlanScreen({ route, navigation }: any) {
   const onAdd = async () => {
     if (!user) return;
     const n = name.trim();
-    const planned = Number(amount);
+    const parsed = parseAmount(amount);
     if (!n) return toast("Enter a plan name.", "error");
-    if (!planned || planned <= 0) return toast("Enter a valid amount.", "error");
+    if (!parsed.ok) return toast(amountError(parsed.reason), "error");
+    const planned = parsed.value;
     const after = remaining - (pending + planned);
     if (after < 0) {
       const ok = await confirm({
@@ -302,7 +310,11 @@ export default function PlanScreen({ route, navigation }: any) {
       if (!ok) return;
     }
     const ts = inputValueToTimestamp(r.dateValue);
-    const expId = await addExpense(user.uid, "month", monthId, {
+    // The id is chosen locally, so the plan link below is written even with no
+    // connection. Awaiting the server here used to mean that offline this
+    // handler stopped dead and the payment was never recorded against the plan
+    // at all — the expense appeared in Monthly, the plan never knew about it.
+    const w = addExpenseLocal(user.uid, "month", monthId, {
       name: payName,
       amount: r.amount,
       type: "minus",
@@ -311,6 +323,7 @@ export default function PlanScreen({ route, navigation }: any) {
       notes: r.notes || `Part payment: ${monthName}`,
       ...(ts ? { createdAt: ts } : {}),
     } as any);
+    const expId = w.id;
 
     {
       const payments = Array.isArray(p.payments) ? p.payments.slice() : [];
@@ -335,7 +348,14 @@ export default function PlanScreen({ route, navigation }: any) {
         ...(st || {}),
       });
       const left = Math.max(0, (Number(p.planned) || 0) - newPaid);
-      toast(`${formatMoney(r.amount)} paid · ${formatMoney(left)} left`, "success");
+      const outcome = await settleOrQueue(w);
+      if (outcome === "failed") {
+        toast("Couldn't record that payment. Try again.", "error");
+      } else if (outcome === "queued") {
+        toast("Recorded on this device — will sync when you're online.", "info");
+      } else {
+        toast(`${formatMoney(r.amount)} paid · ${formatMoney(left)} left`, "success");
+      }
     }
   };
 
@@ -350,6 +370,9 @@ export default function PlanScreen({ route, navigation }: any) {
 
   const doMovePayment = async () => {
     if (!user || !movePay || !movePayTarget || movingPay) return;
+    if (isOffline()) {
+      return toast("Moving an item between plans needs a connection.", "error");
+    }
     const target = plans.find((x) => x.id === movePayTarget);
     setMovingPay(true);
     try {
@@ -532,9 +555,10 @@ export default function PlanScreen({ route, navigation }: any) {
   const submitEdit = async () => {
     if (!user || !edit) return;
     const n = editName.trim();
-    const planned = Number(editAmount);
+    const parsedEdit = parseAmount(editAmount);
     if (!n) return toast("Enter a plan name.", "error");
-    if (!planned || planned <= 0) return toast("Enter a valid amount.", "error");
+    if (!parsedEdit.ok) return toast(amountError(parsedEdit.reason), "error");
+    const planned = parsedEdit.value;
 
     // Record what changed, so the detail popup can explain why the plan says
     // 150 when the entry underneath it says 100. `edit` holds the old values.
@@ -613,8 +637,9 @@ export default function PlanScreen({ route, navigation }: any) {
   const submitTopUp = async () => {
     if (!user || !topUpPlan) return;
     const p = topUpPlan;
-    const amt = Number(topUpAmount);
-    if (!topUpAmount.trim() || isNaN(amt) || amt <= 0) return toast("Enter a valid amount.", "error");
+    const parsedTop = parseAmount(topUpAmount);
+    if (!parsedTop.ok) return toast(amountError(parsedTop.reason), "error");
+    const amt = parsedTop.value;
     const oldPlanned = Number(p.planned) || 0;
     const newPlanned = oldPlanned + amt;
     if (topUpAfter < 0) {

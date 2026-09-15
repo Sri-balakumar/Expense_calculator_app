@@ -137,3 +137,45 @@ export function formatMoney(amount: number | string | null | undefined): string 
     return sym + sign + group(String(Math.round(abs)));
   }
 }
+
+// ---- amount validation ------------------------------------------------------
+//
+// Every screen used to hand-roll `if (!amt || amt <= 0) return "Enter a valid
+// amount."`. That test has a hole: Number("1e999") is Infinity, which is truthy
+// and is not <= 0, so it sailed through and was written to Firestore as a
+// double. From then on every `Number(x) || 0` sum downstream — month totals,
+// year charts, plan progress — evaluated to Infinity or NaN, permanently and
+// with no way to spot which entry did it.
+//
+// There is deliberately no hard ceiling. A cap would one day refuse an amount
+// somebody genuinely meant; callers confirm above LARGE_AMOUNT instead.
+
+/** Above this, ask the user to confirm rather than refusing. */
+export const LARGE_AMOUNT = 1000000;
+
+export type AmountResult =
+  | { ok: true; value: number }
+  | { ok: false; reason: "empty" | "invalid" | "negative" };
+
+export function parseAmount(raw: string | number | null | undefined): AmountResult {
+  if (raw === null || raw === undefined || String(raw).trim() === "") {
+    return { ok: false, reason: "empty" };
+  }
+  const n = Number(raw);
+  // Catches NaN AND Infinity — the latter is the one that used to get through.
+  if (!Number.isFinite(n)) return { ok: false, reason: "invalid" };
+  if (n <= 0) return { ok: false, reason: "negative" };
+  return { ok: true, value: Math.round(n * 100) / 100 };
+}
+
+/** The message to show for a rejected amount, so every screen says the same thing. */
+export function amountError(reason: "empty" | "invalid" | "negative"): string {
+  if (reason === "empty") return "Enter an amount.";
+  if (reason === "invalid") return "That isn't a number we can use.";
+  return "Enter an amount greater than zero.";
+}
+
+/** True when the amount is large enough to be worth double-checking. */
+export function isLargeAmount(value: number): boolean {
+  return value > LARGE_AMOUNT;
+}

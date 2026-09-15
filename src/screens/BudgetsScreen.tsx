@@ -20,7 +20,13 @@ import ScreenHeader from "../components/ScreenHeader";
 import HelpFab from "../components/HelpFab";
 import { HELP_BUDGETS, HELP_GOALS } from "../constants/help";
 import { fetchBudgetsData, createBudget, watchGoals, createGoal } from "../firebase/firestore";
-import { formatMoney, amountToWords, currencySymbol } from "../util/money";
+import {
+  amountError,
+  amountToWords,
+  currencySymbol,
+  formatMoney,
+  parseAmount,
+} from "../util/money";
 import { BudgetDoc, GoalDoc } from "../types";
 
 type BudgetRow = BudgetDoc & { spent: number; remaining: number };
@@ -78,8 +84,9 @@ export default function BudgetsScreen({ navigation }: any) {
       placeholder: "e.g. 10000",
       keyboardType: "numeric",
     });
-    const amount = Number(amountStr);
-    if (!amount || amount <= 0) return toast("Enter a valid amount.", "error");
+    const parsedBudget = parseAmount(amountStr);
+    if (!parsedBudget.ok) return toast(amountError(parsedBudget.reason), "error");
+    const amount = parsedBudget.value;
     if (!user) return;
     const id = await createBudget(user.uid, name, amount);
     navigation.navigate("Month", { id, type: "budget" });
@@ -94,8 +101,16 @@ export default function BudgetsScreen({ navigation }: any) {
     if (!user) return;
     const n = goalName.trim();
     if (!n) return toast("Enter a goal name.", "error");
-    const amt = Number(goalAmount);
-    if (!amt || amt <= 0) return toast("Enter the total amount you have to save.", "error");
+    const parsedGoal = parseAmount(goalAmount);
+    if (!parsedGoal.ok) {
+      return toast(
+        parsedGoal.reason === "empty"
+          ? "Enter the total amount you have to save."
+          : amountError(parsedGoal.reason),
+        "error"
+      );
+    }
+    const amt = parsedGoal.value;
     const id = await createGoal(user.uid, n, amt);
     setGoalModal(false);
     navigation.navigate("Goal", { id });

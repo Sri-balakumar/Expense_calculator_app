@@ -21,7 +21,7 @@ import SelectField from "./SelectField";
 import { Button, MoneyInput } from "./UI";
 import { DEFAULT_CATEGORY, DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
-import { amountToWords, currencySymbol } from "../util/money";
+import { amountError, amountToWords, currencySymbol, parseAmount } from "../util/money";
 import { Expense, ExpenseType } from "../types";
 
 export interface ExpenseFormResult {
@@ -92,9 +92,10 @@ export default function ExpenseFormModal({
 
   const submit = () => {
     const n = name.trim();
-    const amt = Number(amount);
     if (!n) return onError("Enter an expense name.");
-    if (!amt || amt <= 0) return onError("Enter a valid amount.");
+    const parsed = parseAmount(amount);
+    if (!parsed.ok) return onError(amountError(parsed.reason));
+    const amt = parsed.value;
     onSubmit({
       name: n,
       amount: amt,

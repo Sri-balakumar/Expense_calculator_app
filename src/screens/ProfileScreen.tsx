@@ -43,7 +43,15 @@ import {
   updatePaymentMethod,
   deletePaymentMethod,
 } from "../firebase/firestore";
-import { formatMoney, formatMoneyIn, amountToWords, currencySymbol, CURRENCIES } from "../util/money";
+import {
+  amountError,
+  amountToWords,
+  currencySymbol,
+  formatMoney,
+  formatMoneyIn,
+  parseAmount,
+  CURRENCIES,
+} from "../util/money";
 import { fetchRate } from "../util/fx";
 import {
   MoneyDoc,
@@ -250,9 +258,10 @@ export default function ProfileScreen() {
   const saveRec = async () => {
     if (!user) return;
     const n = recName.trim();
-    const amt = Number(recAmount);
+    const parsedRec = parseAmount(recAmount);
     if (!n) return toast("Enter a name.", "error");
-    if (!amt || amt <= 0) return toast("Enter a valid amount.", "error");
+    if (!parsedRec.ok) return toast(amountError(parsedRec.reason), "error");
+    const amt = parsedRec.value;
     if (editRecId) {
       await updateRecurring(user.uid, editRecId, { name: n, amount: amt, category: recCat });
       console.log("[Profile] recurring updated", editRecId);

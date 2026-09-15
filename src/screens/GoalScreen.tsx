@@ -30,7 +30,13 @@ import {
   addExpense,
   getPlans,
 } from "../firebase/firestore";
-import { formatMoney, amountToWords, currencySymbol } from "../util/money";
+import {
+  amountError,
+  amountToWords,
+  currencySymbol,
+  formatMoney,
+  parseAmount,
+} from "../util/money";
 import { toJsDate, formatDateTime } from "../util/date";
 import { derivePlanStatus } from "../util/plan";
 import { GoalDoc, GoalEntry, MonthDoc, PlanDoc } from "../types";
@@ -109,8 +115,9 @@ export default function GoalScreen({ route, navigation }: any) {
 
   const submitEntry = async () => {
     if (!user || !entryModal) return;
-    const amt = Number(entryAmount);
-    if (!amt || amt <= 0) return toast("Enter a valid amount.", "error");
+    const parsedEntry = parseAmount(entryAmount);
+    if (!parsedEntry.ok) return toast(amountError(parsedEntry.reason), "error");
+    const amt = parsedEntry.value;
     if (entryModal === "out" && amt > available) {
       const ok = await confirm({
         title: "Over available",
@@ -167,8 +174,9 @@ export default function GoalScreen({ route, navigation }: any) {
       keyboardType: "numeric",
     });
     if (extra === null) return;
-    const add = Number(extra);
-    if (!add || add <= 0) return toast("Enter a valid amount.", "error");
+    const parsedExtra = parseAmount(extra);
+    if (!parsedExtra.ok) return toast(amountError(parsedExtra.reason), "error");
+    const add = parsedExtra.value;
     await updateGoal(user.uid, id, { target: target + add });
     console.log("[Goal] target increased by", add, "→", target + add);
     load();

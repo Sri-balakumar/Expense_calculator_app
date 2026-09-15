@@ -21,7 +21,7 @@ import SelectField from "./SelectField";
 import { Button, MoneyInput } from "./UI";
 import { DEFAULT_PAYMENT } from "../constants/categories";
 import { todayStr, dateToInputValue, inputValueToDate, formatDateMedium } from "../util/date";
-import { amountToWords, currencySymbol } from "../util/money";
+import { amountError, amountToWords, currencySymbol, parseAmount } from "../util/money";
 
 export interface PlanPayResult {
   name: string;
@@ -86,8 +86,9 @@ export default function PlanPayModal({
   const submit = () => {
     const nm = name.trim() || (defaultName || "").trim();
     if (showName && !nm) return onError("Enter a name.");
-    const amt = Number(amount);
-    if (amount === "" || isNaN(amt) || amt <= 0) return onError("Enter a valid amount.");
+    const parsed = parseAmount(amount);
+    if (!parsed.ok) return onError(amountError(parsed.reason));
+    const amt = parsed.value;
     console.log("[PlanPay] submit", { name: nm, amount: amt, category, date: dateVal });
     onSubmit({ name: nm, amount: amt, category, paymentMethod: payment, notes: notes.trim(), dateValue: dateVal });
   };

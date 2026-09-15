@@ -16,6 +16,7 @@ import {
   setDoc,
   writeBatch,
   serverTimestamp,
+  Timestamp,
   QuerySnapshot,
   DocumentData,
 } from "firebase/firestore";
@@ -35,6 +36,7 @@ import {
 } from "../types";
 import { derivePlanStatus } from "../util/plan";
 import { cacheKeys, isOfflineError, loadCache, saveCache } from "../util/cache";
+import { dropSnapshotMeta, reportSnapshotMeta } from "./writes";
 
 // ---- path helpers -----------------------------------------------------------
 const userRef = (uid: string) => doc(db, "users", uid);
@@ -254,6 +256,18 @@ export async function createMonth(
   name: string,
   currentBalance: number
 ): Promise<string> {
+  // A month's name is its identity everywhere else — fetchYearData buckets by
+  // parsing it, and two "May 2026" docs make the year double-count while the
+  // tap target opens only one of them. The picker greys out months it knows
+  // about, but it silently fails open when its own load fails, so the check has
+  // to exist here too. Not a transaction: this closes the realistic window (a
+  // stale picker, a double tap), not a two-device race.
+  const existing = await getDocs(monthsCol(uid));
+  const clash = existing.docs.find((d) => (d.data() as any)?.name === name);
+  if (clash) {
+    console.log("[Month] createMonth: already exists, reusing", { name, id: clash.id });
+    return clash.id;
+  }
   const ref = await addDoc(monthsCol(uid), {
     name,
     currentBalance,
@@ -423,13 +437,19 @@ export function watchExpenses(
     }
   });
 
-  return onSnapshot(
+  // includeMetadataChanges is required, not cosmetic: without it a snapshot
+  // whose DATA is unchanged but whose metadata flipped (a pending write finally
+  // acknowledged) is never delivered, and the connectivity signal sticks.
+  const unsub = onSnapshot(
     expensesColFor(uid, type, id),
+    { includeMetadataChanges: true },
     (snap) => {
       const list = docsToExpenses(snap);
+      reportSnapshotMeta(key, snap.metadata.fromCache);
       // Offline, Firestore raises an initial event from its empty in-memory
       // cache. Writing that to storage would erase the very data we are trying
-      // to preserve, so only server-confirmed snapshots are persisted.
+      // to preserve, so only server-confirmed snapshots are persisted. Writes
+      // that have not been acknowledged are deliberately not cached.
       if (!snap.metadata.fromCache) {
         live = true;
         saveCache(key, list);
@@ -443,6 +463,10 @@ export function watchExpenses(
     },
     onError
   );
+  return () => {
+    dropSnapshotMeta(key);
+    unsub();
+  };
 }
 
 // One-shot read of a tracker's expenses (used for balance projections).
@@ -455,19 +479,59 @@ export async function getExpenses(
   return docsToExpenses(snap);
 }
 
+// A write the caller can act on before the server has heard about it.
+// `id` is known immediately; `ack` settles only when the server confirms — or,
+// offline, never. Callers must not treat `ack` as the signal that anything
+// reached the user's account: see settleOrQueue in ./writes.
+export interface LocalWrite {
+  id: string;
+  ack: Promise<void>;
+}
+
+// Pick the document id up front instead of letting addDoc mint it on the server.
+// Offline that is the difference between working and silently doing nothing:
+// addDoc's promise never settles without a connection, so a caller that needs
+// the new id — a part payment linking itself into its plan — never gets one.
+export function addExpenseLocal(
+  uid: string,
+  type: TrackerType,
+  id: string,
+  expense: Omit<Expense, "id">
+): LocalWrite {
+  const ref = doc(expensesColFor(uid, type, id));
+  // Honor a caller-supplied createdAt (a chosen date). Otherwise stamp the
+  // clock NOW rather than serverTimestamp(), which resolves when the write is
+  // acknowledged — an entry made on Monday and synced on Thursday would carry
+  // Thursday, landing it in the wrong week and possibly the wrong month.
+  const { createdAt, ...rest } = expense as any;
+  return {
+    id: ref.id,
+    ack: setDoc(ref, { ...rest, createdAt: createdAt ?? Timestamp.now() }),
+  };
+}
+
 export async function addExpense(
   uid: string,
   type: TrackerType,
   id: string,
   expense: Omit<Expense, "id">
 ): Promise<string> {
-  // Honor a caller-supplied createdAt (a chosen date); otherwise use server time.
-  const { createdAt, ...rest } = expense as any;
-  const ref = await addDoc(expensesColFor(uid, type, id), {
-    ...rest,
-    createdAt: createdAt ?? serverTimestamp(),
-  });
-  return ref.id;
+  const w = addExpenseLocal(uid, type, id, expense);
+  await w.ack;
+  return w.id;
+}
+
+export function updateExpenseLocal(
+  uid: string,
+  type: TrackerType,
+  id: string,
+  expenseId: string,
+  updates: Partial<Expense>
+): LocalWrite {
+  return {
+    id: expenseId,
+    ack: updateDoc(doc(expensesColFor(uid, type, id), expenseId), updates as any),
+  };
 }
 
 export async function updateExpense(
@@ -477,7 +541,19 @@ export async function updateExpense(
   expenseId: string,
   updates: Partial<Expense>
 ): Promise<void> {
-  await updateDoc(doc(expensesColFor(uid, type, id), expenseId), updates as any);
+  await updateExpenseLocal(uid, type, id, expenseId, updates).ack;
+}
+
+export function deleteExpenseLocal(
+  uid: string,
+  type: TrackerType,
+  id: string,
+  expenseId: string
+): LocalWrite {
+  return {
+    id: expenseId,
+    ack: deleteDoc(doc(expensesColFor(uid, type, id), expenseId)),
+  };
 }
 
 export async function deleteExpense(
@@ -486,7 +562,7 @@ export async function deleteExpense(
   id: string,
   expenseId: string
 ): Promise<void> {
-  await deleteDoc(doc(expensesColFor(uid, type, id), expenseId));
+  await deleteExpenseLocal(uid, type, id, expenseId).ack;
 }
 
 // ---- saved calculations (per tracker subcollection) -------------------------
@@ -672,10 +748,12 @@ export function watchPlans(
     }
   });
 
-  return onSnapshot(
+  const unsub = onSnapshot(
     plansCol(uid, monthId),
+    { includeMetadataChanges: true },
     (snap) => {
       const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PlanDoc[];
+      reportSnapshotMeta(key, snap.metadata.fromCache);
       if (!snap.metadata.fromCache) {
         live = true;
         saveCache(key, list);
@@ -686,6 +764,10 @@ export function watchPlans(
     },
     onError
   );
+  return () => {
+    dropSnapshotMeta(key);
+    unsub();
+  };
 }
 
 export async function getPlans(uid: string, monthId: string): Promise<PlanDoc[]> {

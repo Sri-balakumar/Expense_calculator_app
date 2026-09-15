@@ -18,6 +18,7 @@ import { useTheme } from "../theme/ThemeContext";
 import Watermark from "../components/Watermark";
 import { useAuth } from "../context/AuthContext";
 import { useFeedback } from "../components/Feedback";
+import { isOffline } from "../firebase/writes";
 import { Card } from "../components/UI";
 import MonthPickerModal from "../components/MonthPickerModal";
 import HelpFab from "../components/HelpFab";
@@ -111,6 +112,11 @@ export default function MonthlyScreen({ navigation }: any) {
   // month actually holds data, so the user can judge before destroying it.
   const onDeleteMonth = async (m: MonthData) => {
     if (!user || deleting) return;
+    // Deleting a month is a cascade of separate batch commits. Half of it
+    // applied offline is far worse than not starting: refuse instead.
+    if (isOffline()) {
+      return toast("Deleting a month needs a connection.", "error");
+    }
     setDeleting(m.id);
     try {
       const c = await monthContents(user.uid, m.id);

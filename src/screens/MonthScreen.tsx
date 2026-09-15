@@ -26,9 +26,6 @@ import {
   TrackerType,
   getMonth,
   watchExpenses,
-  addExpense,
-  updateExpense,
-  deleteExpense,
   updateMonth,
   getCategoryBudgets,
   watchSavedCalcs,
@@ -37,13 +34,19 @@ import {
   SavedCalc,
   getPlans,
   movePaymentToPlan,
+  addExpenseLocal,
+  updateExpenseLocal,
+  deleteExpenseLocal,
   watchPlans,
   addPlan,
   updatePlan,
   getPlan,
+  LocalWrite,
 } from "../firebase/firestore";
-import { formatMoney, currencySymbol } from "../util/money";
+import { formatMoney, currencySymbol, isLargeAmount } from "../util/money";
 import { derivePlanStatus } from "../util/plan";
+import { settleOrQueue, isOffline } from "../firebase/writes";
+import { useSync } from "../context/SyncContext";
 import { exportPdf, exportExcel, attendedWeeks } from "../util/export";
 import {
   toJsDate,
@@ -62,6 +65,7 @@ export default function MonthScreen({ route, navigation }: any) {
   const { colors } = useTheme();
   const { user, profile } = useAuth();
   const { confirm, prompt, toast } = useFeedback();
+  const { noteQueued, noteSettled } = useSync();
   const { label: catLabel, emoji: catEmoji, color: catColor, categories } = useCategories();
   // All spend categories (exclude the salary/income category) — always shown
   // in the Category filter row, even before any entries exist.
@@ -450,8 +454,44 @@ export default function MonthScreen({ route, navigation }: any) {
     setFormVisible(true);
   };
 
+  const QUEUED_MSG = "Saved on this device — will sync when you're online.";
+
+  // One place that decides what a write is allowed to claim. "queued" is the
+  // case that used to masquerade as success: the SDK is holding the write, the
+  // row is on screen, but nothing has reached the account yet — so it must
+  // never borrow the wording or the animation that mean "saved".
+  const report = useCallback(
+    async (w: LocalWrite, msg: { ok: string; queued: string }) => {
+      const outcome = await settleOrQueue(w);
+      if (outcome === "acked") {
+        if (msg.ok) toast(msg.ok, "success");
+      } else if (outcome === "queued") {
+        // Counted until the server answers, so the banner can say how many are
+        // at risk if the app is closed.
+        noteQueued();
+        w.ack.then(noteSettled, noteSettled);
+        toast(msg.queued, "info");
+      } else {
+        toast("Couldn't save. Try again.", "error");
+      }
+      return outcome;
+    },
+    [toast, noteQueued, noteSettled]
+  );
+
   const submitForm = async (r: ExpenseFormResult) => {
     if (!user) return;
+    // A number this big is more often a slipped finger or a stray paste than a
+    // real amount — but it might be real, so ask rather than refuse.
+    if (isLargeAmount(r.amount)) {
+      const ok = await confirm({
+        title: "That's a big amount",
+        message: `${formatMoney(r.amount)} — is that right?`,
+        confirmText: "Yes, it's right",
+        danger: false,
+      });
+      if (!ok) return;
+    }
     // Over-balance warning on spends (months: balance−spent; budgets: amount−spent).
     if (r.type === "minus" && formMode === "add") {
       const remaining = (isBudget ? limit : currentBalance) - spent;
@@ -482,33 +522,33 @@ export default function MonthScreen({ route, navigation }: any) {
     if (ts) payload.createdAt = ts;
 
     setFormVisible(false);
-    try {
-      if (formMode === "edit" && editTarget) {
-        // Editing: clear paymentMethod for income.
-        if (r.type !== "minus") payload.paymentMethod = null;
-        await updateExpense(user.uid, type, id, editTarget.id, payload);
-        // Mirror the change onto the plan this entry belongs to (if any).
-        // Turning a spend into income unlinks it — a plan only tracks spends.
-        await syncPlanForExpense(
-          editTarget.id,
-          r.type === "minus"
-            ? {
-                name: r.name,
-                amount: r.amount,
-                category: r.category,
-                paymentMethod: r.paymentMethod,
-                ...(ts ? { paidAt: ts.toDate() } : {}),
-              }
-            : null
-        );
-        toast("Entry updated", "success");
-      } else {
-        await addExpense(user.uid, type, id, payload);
-        // Play the +/− drop animation; the toast fires when it lands.
-        setAddAnim(r.type);
-      }
-    } catch {
-      toast("Couldn't save. Try again.", "error");
+    if (formMode === "edit" && editTarget) {
+      // Editing: clear paymentMethod for income.
+      if (r.type !== "minus") payload.paymentMethod = null;
+      const w = updateExpenseLocal(user.uid, type, id, editTarget.id, payload);
+      // Mirror the change onto the plan this entry belongs to (if any).
+      // Turning a spend into income unlinks it — a plan only tracks spends.
+      // Not awaited before reporting: it is a follow-up write, and offline it
+      // would never settle and would hold the whole handler open.
+      syncPlanForExpense(
+        editTarget.id,
+        r.type === "minus"
+          ? {
+              name: r.name,
+              amount: r.amount,
+              category: r.category,
+              paymentMethod: r.paymentMethod,
+              ...(ts ? { paidAt: ts.toDate() } : {}),
+            }
+          : null
+      );
+      await report(w, { ok: "Entry updated", queued: QUEUED_MSG });
+    } else {
+      const w = addExpenseLocal(user.uid, type, id, payload);
+      const outcome = await report(w, { ok: "", queued: QUEUED_MSG });
+      // The drop animation is this app's strongest "it's saved" signal, so it
+      // fires only once the server has actually said so. The toast rides on it.
+      if (outcome === "acked") setAddAnim(r.type);
     }
   };
 
@@ -523,9 +563,12 @@ export default function MonthScreen({ route, navigation }: any) {
       confirmText: "Delete",
     });
     if (!ok) return;
-    await deleteExpense(user.uid, type, id, exp.id);
-    await syncPlanForExpense(exp.id, null);
-    toast("Deleted", "success");
+    const w = deleteExpenseLocal(user.uid, type, id, exp.id);
+    syncPlanForExpense(exp.id, null);
+    await report(w, {
+      ok: "Deleted",
+      queued: "Deleted on this device — will sync when you're online.",
+    });
   };
 
   // ---- assign expense(s) to a plan (link) ----
@@ -585,6 +628,14 @@ export default function MonthScreen({ route, navigation }: any) {
 
   const doAssign = async () => {
     if (!user || assignExps.length === 0 || assigning) return;
+    if (isOffline()) {
+      return toast(
+        assignFrom
+          ? "Moving an entry between plans needs a connection."
+          : "Adding an entry to a plan needs a connection.",
+        "error"
+      );
+    }
     setAssigning(true);
     try {
       // The picker's snapshot can be stale, so membership is checked against a
@@ -777,12 +828,31 @@ export default function MonthScreen({ route, navigation }: any) {
       confirmText: "Delete",
     });
     if (!ok) return;
-    for (const eid of selected) {
-      await deleteExpense(user.uid, type, id, eid);
-      await syncPlanForExpense(eid, null);
-    }
-    toast("Deleted", "success");
+    // Issue every delete first, then wait. Awaiting them one at a time meant
+    // that offline the first one never settled and the rest were never even
+    // sent — the user asked to delete five and one went.
+    const writes = [...selected].map((eid) => {
+      const w = deleteExpenseLocal(user.uid, type, id, eid);
+      syncPlanForExpense(eid, null);
+      return w;
+    });
     exitSelect();
+    const outcomes = await Promise.all(writes.map((w) => settleOrQueue(w)));
+    // Only the ones actually still in flight count toward the banner.
+    outcomes.forEach((o, i) => {
+      if (o !== "queued") return;
+      noteQueued();
+      writes[i].ack.then(noteSettled, noteSettled);
+    });
+    const queued = outcomes.filter((o) => o === "queued").length;
+    const failed = outcomes.filter((o) => o === "failed").length;
+    if (failed) {
+      toast(`${failed} couldn't be deleted. Try again.`, "error");
+    } else if (queued) {
+      toast("Deleted on this device — will sync when you're online.", "info");
+    } else {
+      toast("Deleted", "success");
+    }
   };
 
   // --- export ---
