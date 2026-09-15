@@ -36,6 +36,7 @@ import {
   deleteSavedCalc,
   SavedCalc,
   getPlans,
+  movePaymentToPlan,
   watchPlans,
   addPlan,
   updatePlan,
@@ -109,6 +110,9 @@ export default function MonthScreen({ route, navigation }: any) {
   const [assignPlans, setAssignPlans] = useState<PlanDoc[]>([]);
   const [assignPlanId, setAssignPlanId] = useState<string | null>(null);
   const [assignShowNew, setAssignShowNew] = useState(false);
+  // Set when the picker is re-filing an entry that is ALREADY in a plan, which
+  // turns the assign modal into a move: same UI, different write.
+  const [assignFrom, setAssignFrom] = useState<{ planId: string; planName: string } | null>(null);
   const [assignNewName, setAssignNewName] = useState("");
   const assignTotal = assignExps.reduce((s, e) => s + (Number(e.amount) || 0), 0);
   // Expense id → the plan it belongs to. Drives the plan pill on each row and
@@ -525,18 +529,21 @@ export default function MonthScreen({ route, navigation }: any) {
   };
 
   // ---- assign expense(s) to a plan (link) ----
-  const openAssign = async (exps: Expense[]) => {
+  // `from` present = the entry is already in that plan and is being moved out of it.
+  const openAssign = async (exps: Expense[], from?: { planId: string; planName: string }) => {
     if (!user || type !== "month" || exps.length === 0) return;
     setDetails(null);
     setAssignPlanId(null);
     setAssignShowNew(false);
     setAssignNewName("");
+    setAssignFrom(from || null);
     setAssignExps(exps);
     try {
       // A moved plan lives in its target month now, and a done plan is closed —
       // assigning into either would make one obligation pending in two months.
+      // The plan it is leaving is no target either.
       const ps = (await getPlans(user.uid, id)).filter(
-        (p) => p.status !== "moved" && p.status !== "done"
+        (p) => p.status !== "moved" && p.status !== "done" && p.id !== from?.planId
       );
       setAssignPlans(ps);
       console.log("[Month] assign: loaded plans", ps.length, "for", exps.length, "entries");
@@ -546,17 +553,34 @@ export default function MonthScreen({ route, navigation }: any) {
     }
   };
 
-  // Assign the current multi-selection to a plan (skip income + already-assigned).
+  const closeAssign = () => {
+    setAssignExps([]);
+    setAssignFrom(null);
+  };
+
+  // Assign the current multi-selection to a plan. One spend that is already in
+  // a plan is a MOVE — the usual way a wrongly-filed entry gets corrected.
+  // Anything else assigns the entries that aren't linked yet.
   const assignSelection = () => {
     const sel = expenses.filter((e) => selected.has(e.id));
     const hasIncome = sel.some((e) => e.type === "plus");
-    const exps = sel.filter((e) => e.type === "minus" && !planByExpense.has(e.id));
+    const spends = sel.filter((e) => e.type === "minus");
+    if (spends.length === 1 && planByExpense.has(spends[0].id)) {
+      exitSelect();
+      return openAssign([spends[0]], planByExpense.get(spends[0].id));
+    }
+    const exps = spends.filter((e) => !planByExpense.has(e.id));
     if (exps.length === 0) {
       if (hasIncome) return toast("Only spends can be added to plans.", "error");
-      return toast("Select spend entries that aren't already in a plan.", "error");
+      return toast("Select one entry to move it to another plan.", "error");
     }
+    const skipped = spends.length - exps.length;
     exitSelect();
     openAssign(exps);
+    // Say what was left behind rather than dropping it in silence.
+    if (skipped > 0) {
+      toast(`${skipped} already in a plan — move those one at a time.`, "info");
+    }
   };
 
   const doAssign = async () => {
@@ -573,11 +597,16 @@ export default function MonthScreen({ route, navigation }: any) {
         });
         if (p.pushedExpenseId) owner.set(p.pushedExpenseId, p.name);
       });
-      const taken = assignExps.find((e) => owner.has(e.id));
-      if (taken) {
-        toast(`"${taken.name}" is already in "${owner.get(taken.id)}".`, "error");
-        setAssignExps([]);
-        return;
+      // In move mode the entry is SUPPOSED to be owned already — that guard is
+      // what a move has to step past. Every other path still refuses to file one
+      // entry under two plans.
+      if (!assignFrom) {
+        const taken = assignExps.find((e) => owner.has(e.id));
+        if (taken) {
+          toast(`"${taken.name}" is already in "${owner.get(taken.id)}".`, "error");
+          closeAssign();
+          return;
+        }
       }
 
       let planId = assignPlanId;
@@ -597,16 +626,31 @@ export default function MonthScreen({ route, navigation }: any) {
         console.log("[Month] assign: created plan", { pid: planId, pn });
       }
 
+      if (assignFrom) {
+        // Re-file the single entry: subtract from the old plan, add to the new,
+        // both statuses re-derived. One batch, so neither moves without the other.
+        const moved = await movePaymentToPlan(user.uid, id, assignFrom.planId, planId, {
+          expenseId: assignExps[0].id,
+        });
+        const to = current.find((pl) => pl.id === planId);
+        closeAssign();
+        toast(
+          `"${moved.name || assignExps[0].name}" → "${to?.name || assignNewName.trim() || "plan"}"`,
+          "success"
+        );
+        return;
+      }
+
       // Re-read so a payment recorded since the modal opened isn't clobbered.
       const plan = planId === assignPlanId ? current.find((p) => p.id === planId) : await getPlan(user.uid, id, planId);
       if (!plan) {
         toast("That plan no longer exists.", "error");
-        setAssignExps([]);
+        closeAssign();
         return;
       }
       if (plan.status === "moved" || plan.status === "done") {
         toast(`"${plan.name}" is ${plan.status} — pick another plan.`, "error");
-        setAssignExps([]);
+        closeAssign();
         return;
       }
 
@@ -635,14 +679,17 @@ export default function MonthScreen({ route, navigation }: any) {
         count: assignExps.length,
         newPaid,
       });
-      setAssignExps([]);
+      closeAssign();
       toast(
         `${assignExps.length > 1 ? assignExps.length + " entries" : "Assigned"} → "${plan.name}"`,
         "success"
       );
-    } catch (e) {
+    } catch (e: any) {
       console.log("[Month] assign failed", e);
-      toast("Couldn't assign. Try again.", "error");
+      toast(
+        (assignFrom && e?.message) || "Couldn't assign. Try again.",
+        "error"
+      );
     } finally {
       setAssigning(false);
     }
@@ -1330,23 +1377,27 @@ export default function MonthScreen({ route, navigation }: any) {
         }
       />
 
-      {/* Assign expense(s) to a plan */}
-      <Modal visible={assignExps.length > 0} transparent animationType="fade" onRequestClose={() => setAssignExps([])}>
-        <Pressable style={styles.detailsBackdrop} onPress={() => setAssignExps([])}>
+      {/* Assign expense(s) to a plan — or, in move mode, re-file one of them */}
+      <Modal visible={assignExps.length > 0} transparent animationType="fade" onRequestClose={() => closeAssign()}>
+        <Pressable style={styles.detailsBackdrop} onPress={() => closeAssign()}>
           <Pressable style={[styles.detailsCard, { backgroundColor: colors.cardBg }]}>
             <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18, marginBottom: 4 }}>
-              Assign to a plan
+              {assignFrom ? "Move to another plan" : "Assign to a plan"}
             </Text>
             <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 12 }}>
               {assignExps.length === 1
                 ? `"${assignExps[0].name}" · ${formatMoney(assignTotal)}`
                 : `${assignExps.length} entries · ${formatMoney(assignTotal)}`}{" "}
-              — stays in Monthly, also tracked under the plan.
+              {assignFrom
+                ? `— now under "${assignFrom.planName}".`
+                : "— stays in Monthly, also tracked under the plan."}
             </Text>
 
             {assignPlans.length === 0 && !assignShowNew && (
               <Text style={{ color: colors.textMuted, fontSize: 13, paddingVertical: 4 }}>
-                No plans in this month yet — create one below.
+                {assignFrom
+                  ? "No other open plan in this month — create one below."
+                  : "No plans in this month yet — create one below."}
               </Text>
             )}
             <ScrollView style={{ maxHeight: 200 }}>
@@ -1448,11 +1499,19 @@ export default function MonthScreen({ route, navigation }: any) {
               <Button
                 title="Cancel"
                 variant="secondary"
-                onPress={() => setAssignExps([])}
+                onPress={() => closeAssign()}
                 style={{ flex: 1 }}
               />
               <Button
-                title={assignPlanId ? "Assign" : "Create & assign"}
+                title={
+                  assignFrom
+                    ? assignPlanId
+                      ? "Move"
+                      : "Create & move"
+                    : assignPlanId
+                    ? "Assign"
+                    : "Create & assign"
+                }
                 onPress={doAssign}
                 loading={assigning}
                 style={{ flex: 1 }}

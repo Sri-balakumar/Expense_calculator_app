@@ -27,6 +27,7 @@ import {
   MonthData,
   BudgetDoc,
   PlanDoc,
+  PlanPayment,
   RecurringDoc,
   UserDoc,
   GoalDoc,
@@ -809,6 +810,98 @@ export async function movePlans(
   });
   if (moved) await batch.commit();
   return moved;
+}
+
+// Move one added item from one plan to another inside the SAME month — the fix
+// for an entry filed under the wrong plan. Only the two plan docs change: an
+// expense carries no plan id, the plan owns the link through payments[].
+// Same month only, because an expenseId only means anything inside its own
+// month's expenses subcollection (which is why movePlans strips it above).
+// Throws with a message worth showing the user; both writes share one batch, so
+// a failure leaves neither plan changed.
+export async function movePaymentToPlan(
+  uid: string,
+  monthId: string,
+  fromPlanId: string,
+  toPlanId: string,
+  locate: { index?: number; expenseId?: string }
+): Promise<PlanPayment> {
+  if (fromPlanId === toPlanId) throw new Error("That's the same plan.");
+  // The caller's snapshot can be stale — a payment recorded since the picker
+  // opened would be clobbered by writing back an older array.
+  const [from, to] = await Promise.all([
+    getPlan(uid, monthId, fromPlanId),
+    getPlan(uid, monthId, toPlanId),
+  ]);
+  if (!from) throw new Error("That plan no longer exists.");
+  if (!to) throw new Error("The plan you picked no longer exists.");
+  if (to.status === "moved" || to.status === "done") {
+    throw new Error(`"${to.name}" is ${to.status} — pick another plan.`);
+  }
+
+  const fromPays = (Array.isArray(from.payments) ? from.payments : []).slice();
+  // Payments have no id, so the rendered index is their identity — which makes
+  // expenseId the sturdier handle when there is one. If it no longer matches,
+  // the array moved under us and the index that came with it now points at
+  // somebody else's row, so the index is a fallback only when no expenseId was
+  // available to begin with.
+  let idx = locate.expenseId
+    ? fromPays.findIndex((p: any) => p.expenseId === locate.expenseId)
+    : typeof locate.index === "number"
+    ? locate.index
+    : -1;
+  if (idx < 0 || idx >= fromPays.length) {
+    if (locate.expenseId && from.pushedExpenseId === locate.expenseId) {
+      throw new Error("This entry is linked the old way — remove it from the plan and add it again.");
+    }
+    throw new Error("That item is no longer in this plan.");
+  }
+
+  // Carried over as-is: same entry, same money, same time — only its plan changed.
+  const movedPay = fromPays.splice(idx, 1)[0] as PlanPayment;
+  const toPays = (Array.isArray(to.payments) ? to.payments : []).slice();
+  toPays.push(movedPay);
+
+  // Re-sum rather than add/subtract the one amount, so a total that has already
+  // drifted is repaired on the way through.
+  const sum = (list: any[]) => list.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const fromPaid = sum(fromPays);
+  const toPaid = sum(toPays);
+  const fromPlanned = Number(from.planned) || 0;
+
+  // A plan closed by hand stays closed unless the numbers no longer cover it —
+  // derivePlanStatus returns null for closedEarly, so it could never re-open on
+  // its own once the money that filled it has left.
+  const reopen = from.closedEarly && fromPaid < fromPlanned;
+  const fromSt = derivePlanStatus(
+    reopen ? { ...from, closedEarly: false } : from,
+    fromPlanned,
+    fromPaid,
+    fromPays
+  );
+  const toSt = derivePlanStatus(to, Number(to.planned) || 0, toPaid, toPays);
+
+  const batch = writeBatch(db);
+  batch.update(doc(plansCol(uid, monthId), fromPlanId), {
+    payments: fromPays,
+    paid: fromPaid,
+    ...(reopen ? { closedEarly: false } : {}),
+    ...(fromSt || {}),
+  } as any);
+  batch.update(doc(plansCol(uid, monthId), toPlanId), {
+    payments: toPays,
+    paid: toPaid,
+    ...(toSt || {}),
+  } as any);
+  await batch.commit();
+  console.log("[Plan] payment moved", {
+    item: movedPay.name,
+    from: from.name,
+    to: to.name,
+    fromPaid,
+    toPaid,
+  });
+  return movedPay;
 }
 
 // ---- recurring --------------------------------------------------------------

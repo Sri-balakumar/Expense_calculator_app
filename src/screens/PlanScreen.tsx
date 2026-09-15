@@ -27,6 +27,7 @@ import {
   addExpense,
   deleteExpense,
   listMonths,
+  movePaymentToPlan,
   movePlans,
 } from "../firebase/firestore";
 import DateTimePicker from "@react-native-community/datetimepicker";
@@ -81,12 +82,22 @@ export default function PlanScreen({ route, navigation }: any) {
   const [detail, setDetail] = useState<PlanDoc | null>(null);
   // Which item the user is removing, while we ask what to do with its entry.
   const [removeAsk, setRemoveAsk] = useState<{ plan: PlanDoc; idx: number; pay: any } | null>(null);
+  // Which item is being re-filed under a different plan. Distinct from `move`
+  // above, which moves a whole plan to another month.
+  const [movePay, setMovePay] = useState<{ plan: PlanDoc; idx: number; pay: any } | null>(null);
+  const [movePayTarget, setMovePayTarget] = useState<string | null>(null);
+  const [movingPay, setMovingPay] = useState(false);
   const [calOpen, setCalOpen] = useState(false); // calendar popup
 
   // `detail` is only a handle on WHICH plan is open — always read the live doc
   // from the snapshot so the popup reflects edits and payments as they happen.
   const detailPlan = detail ? plans.find((x) => x.id === detail.id) || detail : null;
   const topUpPlan = topUp ? plans.find((x) => x.id === topUp.id) || topUp : null;
+  // Where a mis-filed item can go: every other plan in this month that is still
+  // open. A moved plan lives in another month now and a done one is closed.
+  const movePayOptions = movePay
+    ? plans.filter((x) => x.id !== movePay.plan.id && x.status !== "moved" && x.status !== "done")
+    : [];
 
   // Calendar marks: each plan's date is a planned spend (red dot).
   const planDayKey = (p: PlanDoc) =>
@@ -325,6 +336,37 @@ export default function PlanScreen({ route, navigation }: any) {
       });
       const left = Math.max(0, (Number(p.planned) || 0) - newPaid);
       toast(`${formatMoney(r.amount)} paid · ${formatMoney(left)} left`, "success");
+    }
+  };
+
+  // ---- move an item to another plan ----
+  // Filed under the wrong plan: re-point it instead of removing and re-adding.
+  const openMovePayment = (plan: PlanDoc, idx: number) => {
+    const pay = (Array.isArray(plan.payments) ? plan.payments : [])[idx];
+    if (!pay) return;
+    setMovePayTarget(null);
+    setMovePay({ plan, idx, pay });
+  };
+
+  const doMovePayment = async () => {
+    if (!user || !movePay || !movePayTarget || movingPay) return;
+    const target = plans.find((x) => x.id === movePayTarget);
+    setMovingPay(true);
+    try {
+      const moved = await movePaymentToPlan(
+        user.uid,
+        monthId,
+        movePay.plan.id,
+        movePayTarget,
+        { index: movePay.idx, expenseId: movePay.pay.expenseId }
+      );
+      setMovePay(null);
+      toast(`"${moved.name || "Item"}" → "${target?.name || "plan"}"`, "success");
+    } catch (e: any) {
+      console.log("[Plan] move payment failed", e);
+      toast(e?.message || "Couldn't move that item. Try again.", "error");
+    } finally {
+      setMovingPay(false);
     }
   };
 
@@ -961,6 +1003,78 @@ export default function PlanScreen({ route, navigation }: any) {
         </Pressable>
       </Modal>
 
+      {/* Re-file one item under a different plan in this month */}
+      <Modal visible={!!movePay} transparent animationType="fade" onRequestClose={() => setMovePay(null)}>
+        <Pressable style={styles.backdrop} onPress={() => setMovePay(null)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>
+              Move "{movePay?.pay?.name || movePay?.plan?.name}"
+            </Text>
+            <Text style={{ color: colors.textMuted, marginBottom: 10 }}>
+              {formatMoney(Number(movePay?.pay?.amount) || 0)} · now under "{movePay?.plan?.name}"
+            </Text>
+            {movePayOptions.length === 0 ? (
+              <Text style={{ color: colors.textMuted, paddingVertical: 6 }}>
+                No other open plan in this month to move it to.
+              </Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 200 }}>
+                {movePayOptions.map((pl) => {
+                  const sel = movePayTarget === pl.id;
+                  const planned = Number(pl.planned) || 0;
+                  const paidNow = Number(pl.paid) || 0;
+                  return (
+                    <Pressable
+                      key={pl.id}
+                      onPress={() => setMovePayTarget(sel ? null : pl.id)}
+                      style={[
+                        styles.monthOpt,
+                        { backgroundColor: sel ? colors.primary : colors.chipBg },
+                      ]}
+                    >
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Text
+                          style={{ color: sel ? "#fff" : colors.text, fontWeight: "600", flexShrink: 1 }}
+                          numberOfLines={1}
+                        >
+                          {pl.name}
+                        </Text>
+                        <Text
+                          style={{
+                            color: sel ? "#fff" : colors.textMuted,
+                            fontWeight: "700",
+                            fontSize: 12,
+                            marginLeft: 8,
+                          }}
+                        >
+                          {formatMoney(paidNow)} / {formatMoney(planned)}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            )}
+            <View style={styles.actions}>
+              <Button title="Cancel" variant="secondary" onPress={() => setMovePay(null)} style={{ flex: 1 }} />
+              <Button
+                title="Move"
+                onPress={doMovePayment}
+                loading={movingPay}
+                disabled={!movePayTarget}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* Calendar */}
       <CalendarModal
         visible={calOpen}
@@ -981,6 +1095,7 @@ export default function PlanScreen({ route, navigation }: any) {
                   colors={colors}
                   expenseById={expenseById}
                   onRemove={(idx: number) => removePayment(detailPlan, idx)}
+                  onMove={(idx: number) => openMovePayment(detailPlan, idx)}
                 />
               </ScrollView>
             )}
@@ -1139,7 +1254,7 @@ function MiniBtn({ label, color, onPress }: { label: string; color: string; onPr
   );
 }
 
-function PlanDetail({ p, colors, expenseById, onRemove }: any) {
+function PlanDetail({ p, colors, expenseById, onRemove, onMove }: any) {
   const { label: catLabel, emoji: catEmoji } = useCategories();
   const [allEdits, setAllEdits] = useState(false);
   const planned = Number(p.planned) || 0;
@@ -1219,6 +1334,11 @@ function PlanDetail({ p, colors, expenseById, onRemove }: any) {
                   <Text style={{ color: isCulprit ? colors.danger : colors.text, fontWeight: "600" }}>
                     {formatMoney(pay.amount)}
                   </Text>
+                  {onMove && (
+                    <Pressable onPress={() => onMove(i)} hitSlop={8} style={{ marginLeft: 10 }}>
+                      <Text style={{ color: colors.primary, fontWeight: "700" }}>Move</Text>
+                    </Pressable>
+                  )}
                   {onRemove && (
                     <Pressable onPress={() => onRemove(i)} hitSlop={8} style={{ marginLeft: 10 }}>
                       <Text style={{ color: colors.danger, fontWeight: "700" }}>Remove</Text>
