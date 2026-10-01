@@ -98,3 +98,33 @@ export function formatDateTime(d: Date | null): string {
     return d.toDateString();
   }
 }
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+// "October 2026" -> "September 2026", "January 2027" -> "December 2026".
+// Month docs are named this way (MonthPickerModal), so the name is the only
+// way to find the calendar month before one. null for anything else.
+export function previousMonthName(name: string): string | null {
+  const m = /^([A-Za-z]+) (\d{4})$/.exec((name || "").trim());
+  if (!m) return null;
+  const idx = MONTH_NAMES.indexOf(m[1]);
+  if (idx === -1) return null;
+  const year = Number(m[2]);
+  return idx === 0 ? `December ${year - 1}` : `${MONTH_NAMES[idx - 1]} ${year}`;
+}
+
+// The same day of the month as `d`, but in the named month ("October 2026"),
+// as "YYYY-MM-DD" — a plan reused from last month keeps its day (rent on the
+// 5th stays on the 5th). Clamped to the month's length (31st -> 30th). Today
+// when the name or the date can't be read.
+export function sameDayIn(monthName: string, d: Date | null): string {
+  const m = /^([A-Za-z]+) (\d{4})$/.exec((monthName || "").trim());
+  const idx = m ? MONTH_NAMES.indexOf(m[1]) : -1;
+  if (!m || idx === -1 || !d || isNaN(d.getTime())) return todayStr();
+  const year = Number(m[2]);
+  const last = new Date(year, idx + 1, 0).getDate();
+  return dateToInputValue(new Date(year, idx, Math.min(d.getDate(), last)));
+}

@@ -8,7 +8,7 @@ export const HELP_MONTHLY: HelpContent = {
   title: "Monthly",
   body: [
     "This is your home base. Every month you track lives here as its own card, showing what you spent, what came in, and what's left.",
-    "Tap “New / open month” to start a month. You enter the balance you're beginning with, and the app can carry over whatever was left from your last month automatically.",
+    "Tap “New / open month” to start a month. You enter the balance you're beginning with, and the app can carry over whatever was left from your last month automatically. Your recurring expenses are listed there too — untick any you don't want in the new month.",
     "Open a month to add your spends and income one by one. The card here keeps a running summary, plus a few insights — your biggest spending category, and how much of your salary the month has used up.",
     "Inside a month, every entry also shows the total left right after it — so you can scroll back and watch how the money actually drained away.",
   ],

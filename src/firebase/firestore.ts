@@ -250,11 +250,26 @@ export async function getMonth(
   return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) }) : null;
 }
 
-// Create a month + auto-add recurring expenses (port of createNewMonth).
+// One recurring template as copied into a month.
+export type RecurringPick = Pick<RecurringDoc, "name" | "amount" | "category">;
+
+// Two recurring templates with the same name, amount and category are the same
+// item entered twice — a double tap, or a tap retried while offline. Grouping by
+// this key is what stops a new month getting the same entry five times.
+export function recurringKey(r: RecurringPick): string {
+  const name = (r.name || "").trim().toLowerCase();
+  const amount = Math.round((Number(r.amount) || 0) * 100);
+  return `${name}|${amount}|${r.category || "other"}`;
+}
+
+// Create a month + add the chosen recurring expenses (port of createNewMonth).
+// `opts.recurring` is what the user ticked in the create popup; without it every
+// template is added, each distinct one once.
 export async function createMonth(
   uid: string,
   name: string,
-  currentBalance: number
+  currentBalance: number,
+  opts?: { recurring?: RecurringPick[] }
 ): Promise<string> {
   // A month's name is its identity everywhere else — fetchYearData buckets by
   // parsing it, and two "May 2026" docs make the year double-count while the
@@ -273,11 +288,26 @@ export async function createMonth(
     currentBalance,
     createdAt: serverTimestamp(),
   });
-  const recurringSnap = await getDocs(recurringCol(uid));
-  if (!recurringSnap.empty) {
+  let picks: RecurringPick[];
+  if (opts?.recurring) {
+    picks = opts.recurring;
+  } else {
+    const recurringSnap = await getDocs(recurringCol(uid));
+    picks = recurringSnap.docs.map((d) => d.data() as RecurringPick);
+  }
+  const seen = new Set<string>();
+  picks = picks.filter((r) => {
+    const k = recurringKey(r);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  if (picks.length) {
     const batch = writeBatch(db);
-    recurringSnap.forEach((rec) => {
-      const r = rec.data() as any;
+    // The clock now, not serverTimestamp(): the entries belong to the moment the
+    // month was made, not to whenever the server got round to acknowledging it.
+    const now = Timestamp.now();
+    picks.forEach((r) => {
       const expRef = doc(monthExpensesCol(uid, ref.id));
       batch.set(expRef, {
         name: r.name,
@@ -287,7 +317,7 @@ export async function createMonth(
         paymentMethod: "other",
         notes: "Recurring",
         recurring: true,
-        createdAt: serverTimestamp(),
+        createdAt: now,
       });
     });
     await batch.commit();

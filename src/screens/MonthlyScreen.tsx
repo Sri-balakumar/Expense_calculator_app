@@ -284,13 +284,16 @@ export default function MonthlyScreen({ navigation }: any) {
                         {formatMoney(m.spent)}
                       </Text>
                       {"  ·  "}Left{" "}
+                      {/* The month's own balance, as its screen shows it — not
+                          salary − spent, which ignored the balance typed in when
+                          the month was created. */}
                       <Text
                         style={{
-                          color: m.remaining < 0 ? colors.danger : colors.success,
+                          color: m.totalRemaining < 0 ? colors.danger : colors.success,
                           fontWeight: "600",
                         }}
                       >
-                        {formatMoney(m.remaining)}
+                        {formatMoney(m.totalRemaining)}
                       </Text>
                     </Text>
                   </View>
