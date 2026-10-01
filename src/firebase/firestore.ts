@@ -817,6 +817,17 @@ export async function addPlan(
   return ref.id;
 }
 
+// addPlan with the id picked on the device (see addExpenseLocal): offline the
+// awaited addDoc never settles, which would leave the caller waiting forever.
+export function addPlanLocal(
+  uid: string,
+  monthId: string,
+  plan: Omit<PlanDoc, "id">
+): LocalWrite {
+  const ref = doc(plansCol(uid, monthId));
+  return { id: ref.id, ack: setDoc(ref, { ...plan, createdAt: serverTimestamp() }) };
+}
+
 export async function updatePlan(
   uid: string,
   monthId: string,
@@ -841,6 +852,16 @@ export async function getPlan(
 ): Promise<PlanDoc | null> {
   const snap = await getDoc(doc(plansCol(uid, monthId), planId));
   return snap.exists() ? ({ id: snap.id, ...(snap.data() as any) } as PlanDoc) : null;
+}
+
+// Save the order the user dragged the plans into: `ids` top to bottom. Every
+// plan gets its position, so the list never mixes dragged and undragged plans
+// (see comparePlans). Returned as a LocalWrite — the snapshot shows the new
+// order at once, and offline the commit would otherwise hang the caller.
+export function reorderPlans(uid: string, monthId: string, ids: string[]): LocalWrite {
+  const batch = writeBatch(db);
+  ids.forEach((id, i) => batch.update(doc(plansCol(uid, monthId), id), { order: i }));
+  return { id: monthId, ack: batch.commit() };
 }
 
 // Move plans to another month (port of executeMove). mode "whole" moves the

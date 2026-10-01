@@ -100,6 +100,9 @@ export interface PlanDoc {
   // Where a moved plan went — used to undo the move (delete the copy + restore).
   movedToMonthId?: string | null;
   movedToPlanId?: string | null;
+  // Position set by dragging in the plan list. Unset on plans nobody has
+  // reordered yet — see comparePlans in util/plan.ts.
+  order?: number;
   createdAt?: any;
 }
 

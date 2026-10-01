@@ -4,6 +4,7 @@
 // same answer and a plan can't get stuck saying "Done" once it no longer is.
 
 import { PlanDoc, PlanStatus } from "../types";
+import { toJsDate } from "./date";
 
 export interface DerivedStatus {
   status: PlanStatus;
@@ -29,4 +30,20 @@ export function derivePlanStatus(
   if (plan.closedEarly) return null;
   if (paid > 0 || payments.length > 0) return { status: "partial", actual: null };
   return { status: "pending", actual: null };
+}
+
+// List order for plans. A plan the user has dragged carries `order` (0..n);
+// everything else falls back to when it was created. Ordered plans always come
+// first, since 0..n is far below any timestamp, so a plan added after a reorder
+// lands at the bottom without the add paths knowing about `order` at all. A
+// plan still waiting for its server timestamp has no createdAt yet — it is the
+// newest one, so it goes last rather than jumping to the top.
+export function comparePlans(a: PlanDoc, b: PlanDoc): number {
+  return planSortKey(a) - planSortKey(b);
+}
+
+function planSortKey(p: PlanDoc): number {
+  if (typeof p.order === "number") return p.order;
+  const t = toJsDate(p.createdAt)?.getTime();
+  return typeof t === "number" && !isNaN(t) ? t : Number.MAX_SAFE_INTEGER;
 }

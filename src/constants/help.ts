@@ -24,6 +24,8 @@ export const HELP_PLANS: HelpContent = {
     "When you actually pay, tap Done or Part. A part payment records a real entry in Monthly for you, so you never type it twice. You can also work the other way: tap an existing entry in Monthly and assign it to a plan.",
     "A plan closes itself once it's fully covered — you don't have to mark it done. If it turns out to cost more, tap “+ Add” to raise the amount and the plan re-opens with the difference still to pay.",
     "Not paying it this month? Move the plan to the next one and it carries across instead of quietly disappearing.",
+    "Same plans every month? Open “From <last month>” and tap + Add on a plan — check or change its name and amount, then Save & add.",
+    "Want them in a different order? Tap ⇅ Reorder (or long-press a plan), hold ≡ and drag, then tap Done.",
   ],
   example:
     "It's the 3rd and you have ₹18,000 left, but rent of ₹12,000 is due on the 28th. Add rent as a plan and the month reads ₹6,000 after plans — the number you can actually spend. Pay ₹12,000 on the 28th, tap Done, and it's recorded in Monthly automatically.",

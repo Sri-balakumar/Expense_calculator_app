@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Modal,
   Pressable,
@@ -20,7 +20,7 @@ import {
   getMonth,
   watchExpenses,
   watchPlans,
-  addPlan,
+  addPlanLocal,
   updatePlan,
   deletePlan,
   getPlan,
@@ -29,7 +29,10 @@ import {
   listMonths,
   movePaymentToPlan,
   movePlans,
+  getPlans,
+  reorderPlans,
 } from "../firebase/firestore";
+import ReorderList from "../components/ReorderList";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import {
   amountError,
@@ -46,9 +49,11 @@ import {
   inputValueToDate,
   inputValueToTimestamp,
   formatDateMedium,
+  previousMonthName,
+  sameDayIn,
 } from "../util/date";
 import { useCategories, useQuickAddCategory } from "../context/CategoriesContext";
-import { derivePlanStatus } from "../util/plan";
+import { comparePlans, derivePlanStatus } from "../util/plan";
 import { settleOrQueue, isOffline } from "../firebase/writes";
 import { PlanDoc, PlanEdit, Expense, MonthDoc } from "../types";
 
@@ -56,7 +61,7 @@ export default function PlanScreen({ route, navigation }: any) {
   const { colors } = useTheme();
   const { user, profile } = useAuth();
   const { confirm, toast } = useFeedback();
-  const { options: catOptions } = useCategories();
+  const { options: catOptions, emoji: catEmoji } = useCategories();
   const PLAN_CAT_OPTS = catOptions(false);
   const quickAddCategory = useQuickAddCategory();
 
@@ -75,6 +80,24 @@ export default function PlanScreen({ route, navigation }: any) {
   const [category, setCategory] = useState("other");
   const [planDate, setPlanDate] = useState(todayStr());
   const [showPlanDate, setShowPlanDate] = useState(false);
+  // Both the form and "From last month" add through createPlan; a second tap
+  // before the first write returns would add the plan twice.
+  const addingRef = useRef(false);
+
+  // "From last month": the plans of the month before this one, to add again.
+  const [prevMonth, setPrevMonth] = useState<{ id: string; name: string } | null>(null);
+  const [prevPlans, setPrevPlans] = useState<PlanDoc[]>([]);
+  const [fromOpen, setFromOpen] = useState(false);
+  // The plan being re-added, while the popup lets its name/amount be changed.
+  const [reuse, setReuse] = useState<PlanDoc | null>(null);
+  const [reuseName, setReuseName] = useState("");
+  const [reuseAmount, setReuseAmount] = useState("");
+  const [reuseCat, setReuseCat] = useState("other");
+
+  // Drag to reorder.
+  const [reordering, setReordering] = useState(false);
+  const [draftOrder, setDraftOrder] = useState<string[] | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   // modal state
   const [pay, setPay] = useState<{ plan: PlanDoc; mode: "done" | "part" } | null>(null);
@@ -173,8 +196,8 @@ export default function PlanScreen({ route, navigation }: any) {
       setExpenseById(byId);
     });
     const unsubPlans = watchPlans(user.uid, monthId, (list) => {
-      // createdAt asc
-      list.sort((a, b) => (toJsDate(a.createdAt)?.getTime() || 0) - (toJsDate(b.createdAt)?.getTime() || 0));
+      // dragged order first, then oldest first
+      list.sort(comparePlans);
       setPlans(list);
     });
     return () => {
@@ -182,6 +205,36 @@ export default function PlanScreen({ route, navigation }: any) {
       unsubPlans();
     };
   }, [user, monthId]);
+
+  // The month before this one: the calendar month by name when it exists,
+  // otherwise whichever month was created just before this one.
+  useEffect(() => {
+    if (!user) return;
+    let alive = true;
+    (async () => {
+      try {
+        const all = await listMonths(user.uid); // newest first
+        const prevName = previousMonthName(monthName);
+        let prev = all.find((m) => m.name === prevName);
+        if (!prev) {
+          const idx = all.findIndex((m) => m.id === monthId);
+          prev = idx >= 0 ? all[idx + 1] : undefined;
+        }
+        if (!prev) return;
+        // A moved plan's live copy is in another month already.
+        const list = (await getPlans(user.uid, prev.id)).filter((p) => p.status !== "moved");
+        list.sort(comparePlans);
+        if (!alive) return;
+        setPrevMonth({ id: prev.id, name: prev.name });
+        setPrevPlans(list);
+      } catch (e: any) {
+        console.log("[Plan] last month's plans unavailable", e?.message);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [user, monthId, monthName]);
 
   // figures
   const { pending } = useMemo(() => {
@@ -206,39 +259,117 @@ export default function PlanScreen({ route, navigation }: any) {
   const liveAfter = remaining - liveTotal;
 
   // ---- add ----
-  const onAdd = async () => {
-    if (!user) return;
-    const n = name.trim();
-    const parsed = parseAmount(amount);
-    if (!n) return toast("Enter a plan name.", "error");
-    if (!parsed.ok) return toast(amountError(parsed.reason), "error");
-    const planned = parsed.value;
-    const after = remaining - (pending + planned);
-    if (after < 0) {
-      const ok = await confirm({
-        title: "Plans exceed balance",
-        message: `Adding this makes pending plans ${formatMoney(-after)} more than your balance (${formatMoney(remaining)}). Add anyway?`,
-        confirmText: "Add anyway",
-      });
-      if (!ok) return;
+  // Shared by the add form and "From last month", so a re-added plan gets the
+  // same checks and the same over-balance warning. "acked" = saved, "queued" =
+  // held on this device (already said so), null = not added.
+  const createPlan = async (input: {
+    name: string;
+    amount: string;
+    category: string;
+    date: string;
+  }): Promise<"acked" | "queued" | null> => {
+    if (!user || addingRef.current) return null;
+    const n = input.name.trim();
+    const parsed = parseAmount(input.amount);
+    if (!n) {
+      toast("Enter a plan name.", "error");
+      return null;
     }
-    await addPlan(user.uid, monthId, {
-      name: n,
-      planned,
-      category,
-      status: "pending",
-      actual: null,
-      paid: 0,
-      payments: [],
-      pushedExpenseId: null,
-      date: inputValueToTimestamp(planDate),
-    } as any);
-    console.log("[Plan] added", { name: n, planned, category, date: planDate });
+    if (!parsed.ok) {
+      toast(amountError(parsed.reason), "error");
+      return null;
+    }
+    const planned = parsed.value;
+    addingRef.current = true;
+    try {
+      const after = remaining - (pending + planned);
+      if (after < 0) {
+        const ok = await confirm({
+          title: "Plans exceed balance",
+          message: `Adding this makes pending plans ${formatMoney(-after)} more than your balance (${formatMoney(remaining)}). Add anyway?`,
+          confirmText: "Add anyway",
+        });
+        if (!ok) return null;
+      }
+      const outcome = await settleOrQueue(
+        addPlanLocal(user.uid, monthId, {
+          name: n,
+          planned,
+          category: input.category,
+          status: "pending",
+          actual: null,
+          paid: 0,
+          payments: [],
+          pushedExpenseId: null,
+          date: inputValueToTimestamp(input.date),
+        } as any)
+      );
+      console.log("[Plan] added", { name: n, planned, category: input.category, date: input.date, outcome });
+      if (outcome === "failed") {
+        toast("Couldn't add that plan. Try again.", "error");
+        return null;
+      }
+      if (outcome === "queued") toast("Added on this device — will sync when you're online.", "info");
+      return outcome;
+    } finally {
+      addingRef.current = false;
+    }
+  };
+
+  const onAdd = async () => {
+    const ok = await createPlan({ name, amount, category, date: planDate });
+    if (!ok) return;
     setName("");
     setAmount("");
     setCategory("other");
     setPlanDate(todayStr());
     setAddOpen(false); // collapse the dropdown after adding
+  };
+
+  // ---- from last month ----
+  const openReuse = (p: PlanDoc) => {
+    setReuse(p);
+    setReuseName(p.name || "");
+    setReuseAmount(String(Number(p.planned) || ""));
+    setReuseCat(p.category || "other");
+  };
+  const submitReuse = async () => {
+    if (!reuse) return;
+    // Same day of the month as last time, in this month.
+    const date = sameDayIn(monthName, toJsDate((reuse as any).date) || toJsDate(reuse.createdAt));
+    const outcome = await createPlan({ name: reuseName, amount: reuseAmount, category: reuseCat, date });
+    if (!outcome) return;
+    if (outcome === "acked") toast(`${reuseName.trim()} added to ${monthName}`, "success");
+    setReuse(null);
+  };
+  // Names already in this month, to mark last month's rows "✓ added".
+  const planNamesHere = useMemo(
+    () => new Set(plans.map((p) => (p.name || "").trim().toLowerCase())),
+    [plans]
+  );
+
+  // ---- reorder ----
+  const startReorder = () => {
+    if (plans.length < 2) return;
+    setDraftOrder(null);
+    setReordering(true);
+  };
+  const saveOrder = async () => {
+    setReordering(false);
+    setDragging(false);
+    if (!user || !draftOrder) return;
+    // Only plans that still exist — one deleted meanwhile would fail the batch —
+    // plus any added meanwhile, at the bottom.
+    const live = new Set(plans.map((p) => p.id));
+    const ids = draftOrder.filter((id) => live.has(id));
+    plans.forEach((p) => {
+      if (!ids.includes(p.id)) ids.push(p.id);
+    });
+    setDraftOrder(null);
+    const outcome = await settleOrQueue(reorderPlans(user.uid, monthId, ids));
+    console.log("[Plan] reordered", { count: ids.length, outcome });
+    if (outcome === "failed") toast("Couldn't save the new order. Try again.", "error");
+    else if (outcome === "queued") toast("Order saved on this device — will sync when you're online.", "info");
   };
 
   // ---- done / part-pay ----
@@ -697,7 +828,7 @@ export default function PlanScreen({ route, navigation }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgSoft }}>
       <Watermark />
-      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} scrollEnabled={!dragging}>
         {/* Figures */}
         <Card>
           <View style={styles.figRow}>
@@ -824,10 +955,95 @@ export default function PlanScreen({ route, navigation }: any) {
           )}
         </Card>
 
+        {/* From last month (collapsible) — re-add a plan without retyping it */}
+        {prevMonth && prevPlans.length > 0 && (
+          <Card>
+            <Pressable
+              onPress={() => setFromOpen((o) => !o)}
+              style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
+            >
+              <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 0, flexShrink: 1 }]}>
+                From {prevMonth.name}
+                <Text style={{ color: colors.textMuted, fontWeight: "600" }}>
+                  {"  ·  "}
+                  {prevPlans.length} plan{prevPlans.length > 1 ? "s" : ""}
+                </Text>
+              </Text>
+              <Text style={{ color: colors.primary, fontSize: 16, fontWeight: "800" }}>
+                {fromOpen ? "▲" : "▼"}
+              </Text>
+            </Pressable>
+            {fromOpen && (
+              <View style={{ marginTop: 8 }}>
+                <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 4 }}>
+                  Tap + Add to use a plan again — you can change its name or amount first.
+                </Text>
+                {prevPlans.map((p, i) => {
+                  const added = planNamesHere.has((p.name || "").trim().toLowerCase());
+                  return (
+                    <View
+                      key={p.id}
+                      style={[
+                        styles.fromRow,
+                        { borderTopColor: colors.border, borderTopWidth: i === 0 ? 0 : StyleSheet.hairlineWidth },
+                      ]}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text numberOfLines={1} style={{ color: colors.text, fontWeight: "600" }}>
+                          {catEmoji(p.category || "other")} {p.name}
+                        </Text>
+                        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>
+                          {formatMoney(Number(p.planned) || 0)}
+                          {added ? "  ·  ✓ added" : ""}
+                        </Text>
+                      </View>
+                      <MiniBtn label="+ Add" color={colors.primary} onPress={() => openReuse(p)} />
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </Card>
+        )}
+
         {/* Rows */}
+        {plans.length > 1 && !reordering && (
+          <Pressable onPress={startReorder} hitSlop={8} style={{ alignSelf: "flex-end", marginBottom: 6, marginRight: 4 }}>
+            <Text style={{ color: colors.primary, fontWeight: "700", fontSize: 13 }}>⇅ Reorder</Text>
+          </Pressable>
+        )}
         {plans.length === 0 ? (
           <Card>
             <Text style={{ color: colors.textMuted, textAlign: "center" }}>No plans yet.</Text>
+          </Card>
+        ) : reordering ? (
+          <Card>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Reorder plans</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 10 }}>
+              Hold ≡ and drag a plan up or down.
+            </Text>
+            <ReorderList
+              items={plans.map((p) => ({
+                id: p.id,
+                title: `${catEmoji(p.category || "other")} ${p.name}`,
+                right: formatMoney(Number(p.planned) || 0),
+              }))}
+              onChange={setDraftOrder}
+              onDragState={setDragging}
+            />
+            <View style={styles.actions}>
+              <Button
+                title="Cancel"
+                variant="secondary"
+                onPress={() => {
+                  setReordering(false);
+                  setDragging(false);
+                  setDraftOrder(null);
+                }}
+                style={{ flex: 1 }}
+              />
+              <Button title="Done" onPress={saveOrder} style={{ flex: 1 }} />
+            </View>
           </Card>
         ) : (
           plans.map((p) => (
@@ -835,6 +1051,7 @@ export default function PlanScreen({ route, navigation }: any) {
               key={p.id}
               p={p}
               colors={colors}
+              onLongPress={startReorder}
               onDetail={() => setDetail(p)}
               onTopUp={() => openTopUp(p)}
               onDone={() => openDone(p)}
@@ -874,6 +1091,51 @@ export default function PlanScreen({ route, navigation }: any) {
         onSubmit={submitPay}
         onError={(m) => toast(m, "error")}
       />
+
+      {/* From last month — confirm (or change) the name and amount, then add */}
+      <Modal visible={!!reuse} transparent animationType="fade" onRequestClose={() => setReuse(null)}>
+        <Pressable style={styles.backdrop} onPress={() => setReuse(null)}>
+          <Pressable style={[styles.modalCard, { backgroundColor: colors.cardBg }]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>Add to {monthName}</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 10 }}>
+              From {prevMonth?.name}. Change anything you need, or just save.
+            </Text>
+            <TextInput
+              style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg }]}
+              value={reuseName}
+              onChangeText={setReuseName}
+              placeholder="Name"
+              placeholderTextColor={colors.textMuted}
+            />
+            <MoneyInput
+              style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg, marginTop: 8 }]}
+              placeholder={`Planned amount (${currencySymbol().trim()})`}
+              value={reuseAmount}
+              onChangeText={setReuseAmount}
+            />
+            {Number(reuseAmount) > 0 && (
+              <Text style={{ color: colors.primary, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
+                {amountToWords(reuseAmount)}
+              </Text>
+            )}
+            <View style={{ marginTop: 8 }}>
+              <SelectField
+                title="Category"
+                placeholder="Select category"
+                options={PLAN_CAT_OPTS}
+                value={reuseCat}
+                onChange={setReuseCat}
+                onAdd={quickAddCategory}
+                addLabel="Add category"
+              />
+            </View>
+            <View style={styles.actions}>
+              <Button title="Cancel" variant="secondary" onPress={() => setReuse(null)} style={{ flex: 1 }} />
+              <Button title="Save & add" onPress={submitReuse} style={{ flex: 1 }} />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Edit */}
       <Modal visible={!!edit} transparent animationType="fade" onRequestClose={() => setEdit(null)}>
@@ -1193,7 +1455,7 @@ function statusChip(p: PlanDoc, colors: any) {
   return map[p.status] || map.pending;
 }
 
-function PlanRow({ p, colors, onDetail, onTopUp, onDone, onPart, onMove, onEdit, onDelete, onUndo, onUndoMove }: any) {
+function PlanRow({ p, colors, onLongPress, onDetail, onTopUp, onDone, onPart, onMove, onEdit, onDelete, onUndo, onUndoMove }: any) {
   const { emoji: catEmoji } = useCategories();
   const planned = Number(p.planned) || 0;
   const paid = Number(p.paid) || 0;
@@ -1216,7 +1478,8 @@ function PlanRow({ p, colors, onDetail, onTopUp, onDone, onPart, onMove, onEdit,
 
   return (
     <Card style={over ? { borderWidth: 1.5, borderColor: colors.danger } : undefined}>
-      <Pressable onPress={onDetail}>
+      {/* Long-press opens reorder mode, the same hold MonthScreen uses for select. */}
+      <Pressable onPress={onDetail} onLongPress={onLongPress} delayLongPress={400}>
         <View style={styles.rowTop}>
           {/* flex:1 (not just flexShrink) — otherwise a long name next to a wide
               status chip collapses to nothing and only the emoji is left. */}
@@ -1446,6 +1709,7 @@ const styles = StyleSheet.create({
   modalCard: { width: "100%", maxWidth: 420, borderRadius: 20, padding: 20, maxHeight: "85%" },
   actions: { flexDirection: "row", gap: 10, marginTop: 16 },
   monthOpt: { padding: 12, borderRadius: 10, marginBottom: 8 },
+  fromRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8 },
   liveBox: { marginTop: 10, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
   liveRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 3 },
   liveTotalRow: { borderTopWidth: 1, marginTop: 4, paddingTop: 7 },

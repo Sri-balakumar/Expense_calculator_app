@@ -44,7 +44,7 @@ import {
   LocalWrite,
 } from "../firebase/firestore";
 import { formatMoney, currencySymbol, isLargeAmount } from "../util/money";
-import { derivePlanStatus } from "../util/plan";
+import { comparePlans, derivePlanStatus } from "../util/plan";
 import { settleOrQueue, isOffline } from "../firebase/writes";
 import { useSync } from "../context/SyncContext";
 import { exportPdf, exportExcel, attendedWeeks } from "../util/export";
@@ -588,6 +588,7 @@ export default function MonthScreen({ route, navigation }: any) {
       const ps = (await getPlans(user.uid, id)).filter(
         (p) => p.status !== "moved" && p.status !== "done" && p.id !== from?.planId
       );
+      ps.sort(comparePlans); // the order the Plans screen shows them in
       setAssignPlans(ps);
       console.log("[Month] assign: loaded plans", ps.length, "for", exps.length, "entries");
     } catch (e) {
