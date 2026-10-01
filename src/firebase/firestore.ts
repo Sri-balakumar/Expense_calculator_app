@@ -1022,12 +1022,16 @@ export async function listRecurring(uid: string): Promise<RecurringDoc[]> {
   return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
 }
 
-export async function addRecurring(
+// Id picked on the device, like addExpenseLocal: an awaited addDoc never settles
+// offline, which left the Add button live while the modal stayed open — each
+// extra tap queued another copy of the same template, and every new month then
+// got all of them.
+export function addRecurring(
   uid: string,
   rec: Omit<RecurringDoc, "id">
-): Promise<string> {
-  const ref = await addDoc(recurringCol(uid), rec);
-  return ref.id;
+): LocalWrite {
+  const ref = doc(recurringCol(uid));
+  return { id: ref.id, ack: setDoc(ref, rec) };
 }
 
 export async function updateRecurring(

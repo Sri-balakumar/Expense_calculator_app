@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Modal,
@@ -42,7 +42,9 @@ import {
   addPaymentMethod,
   updatePaymentMethod,
   deletePaymentMethod,
+  recurringKey,
 } from "../firebase/firestore";
+import { settleOrQueue } from "../firebase/writes";
 import {
   amountError,
   amountToWords,
@@ -118,6 +120,10 @@ export default function ProfileScreen() {
   const [recAmount, setRecAmount] = useState("");
   const [recCat, setRecCat] = useState("other");
   const [editRecId, setEditRecId] = useState<string | null>(null); // null = adding
+  // A ref, not just state: a second tap can land before the re-render that
+  // would disable the button, and each one used to add another copy.
+  const savingRecRef = useRef(false);
+  const [savingRec, setSavingRec] = useState(false);
 
   const [catModal, setCatModal] = useState(false);
   const [editCatId, setEditCatId] = useState<string | null>(null); // key being edited
@@ -262,20 +268,77 @@ export default function ProfileScreen() {
     if (!n) return toast("Enter a name.", "error");
     if (!parsedRec.ok) return toast(amountError(parsedRec.reason), "error");
     const amt = parsedRec.value;
-    if (editRecId) {
-      await updateRecurring(user.uid, editRecId, { name: n, amount: amt, category: recCat });
-      console.log("[Profile] recurring updated", editRecId);
-      toast("Recurring updated", "success");
-    } else {
-      await addRecurring(user.uid, { name: n, amount: amt, category: recCat });
-      console.log("[Profile] recurring added", n);
-      toast("Recurring added", "success");
+    if (savingRecRef.current) return;
+    savingRecRef.current = true;
+    setSavingRec(true);
+    try {
+      if (editRecId) {
+        await updateRecurring(user.uid, editRecId, { name: n, amount: amt, category: recCat });
+        console.log("[Profile] recurring updated", editRecId);
+        toast("Recurring updated", "success");
+      } else {
+        const same = recurring.find(
+          (r) => recurringKey(r) === recurringKey({ name: n, amount: amt, category: recCat })
+        );
+        if (same) {
+          const ok = await confirm({
+            title: "Already added",
+            message: `You already have ${same.name} ${formatMoney(amt)}. Every new month would offer it twice. Add another?`,
+            confirmText: "Add another",
+            danger: false,
+          });
+          if (!ok) return;
+        }
+        const outcome = await settleOrQueue(
+          addRecurring(user.uid, { name: n, amount: amt, category: recCat })
+        );
+        console.log("[Profile] recurring added", n, outcome);
+        if (outcome === "failed") return toast("Couldn't add that. Try again.", "error");
+        if (outcome === "queued") toast("Added on this device — will sync when you're online.", "info");
+        else toast("Recurring added", "success");
+      }
+      setRecModal(false);
+      setEditRecId(null);
+      setRecName("");
+      setRecAmount("");
+      setRecCat("other");
+      loadLists();
+    } finally {
+      savingRecRef.current = false;
+      setSavingRec(false);
     }
-    setRecModal(false);
-    setEditRecId(null);
-    setRecName("");
-    setRecAmount("");
-    setRecCat("other");
+  };
+
+  // Extra copies of the same template (same name, amount and category) — every
+  // one after the first of its kind. These are what put one entry into a new
+  // month five times over.
+  const duplicateRecs = (() => {
+    const seen = new Set<string>();
+    return recurring.filter((r) => {
+      const k = recurringKey(r);
+      if (seen.has(k)) return true;
+      seen.add(k);
+      return false;
+    });
+  })();
+
+  const removeDuplicateRecs = async () => {
+    if (!user || duplicateRecs.length === 0) return;
+    const n = duplicateRecs.length;
+    const ok = await confirm({
+      title: `Remove ${n} duplicate${n > 1 ? "s" : ""}?`,
+      message:
+        "One of each stays. Months you already created keep their entries — remove extras there with a long-press on the entry.",
+      confirmText: "Remove",
+    });
+    if (!ok) return;
+    try {
+      await Promise.all(duplicateRecs.map((r) => deleteRecurring(user.uid, r.id)));
+      toast(`${n} duplicate${n > 1 ? "s" : ""} removed`, "success");
+    } catch (e: any) {
+      console.log("[Profile] remove duplicates failed", e?.message);
+      toast("Couldn't remove them all. Try again.", "error");
+    }
     loadLists();
   };
 
@@ -699,8 +762,15 @@ export default function ProfileScreen() {
       <Card>
         <Text style={[styles.cardTitle, { color: colors.text }]}>Recurring expenses</Text>
         <Text style={{ color: colors.textMuted, fontSize: 13, marginBottom: 10 }}>
-          Auto-added to every new month (rent, subscriptions…).
+          Offered when you create a month — tick the ones to add (rent, subscriptions…).
         </Text>
+        {duplicateRecs.length > 0 && (
+          <Pressable onPress={removeDuplicateRecs} style={{ marginBottom: 10 }} hitSlop={6}>
+            <Text style={{ color: colors.danger, fontWeight: "700", fontSize: 13 }}>
+              ⚠ Remove {duplicateRecs.length} duplicate{duplicateRecs.length > 1 ? "s" : ""}
+            </Text>
+          </Pressable>
+        )}
         {recurring.length === 0 ? (
           <Text style={{ color: colors.textMuted, textAlign: "center", paddingVertical: 8 }}>None yet.</Text>
         ) : (
@@ -1144,7 +1214,13 @@ export default function ProfileScreen() {
             />
             <View style={styles.actions}>
               <Button title="Cancel" variant="secondary" onPress={() => setRecModal(false)} style={{ flex: 1 }} />
-              <Button title={editRecId ? "Save" : "Add"} onPress={saveRec} style={{ flex: 1 }} />
+              <Button
+                title={editRecId ? "Save" : "Add"}
+                onPress={saveRec}
+                loading={savingRec}
+                disabled={savingRec}
+                style={{ flex: 1 }}
+              />
             </View>
           </Pressable>
         </Pressable>
